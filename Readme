@@ -1,0 +1,65 @@
+# CorbanX API
+
+Wrapper FastAPI para a plataforma CorbanX — consulta multi-banco CLT e FGTS em paralelo.
+
+## Porta: 8004
+
+## Endpoints
+
+### `GET /`
+Health check.
+
+### `POST /simular_corbanx_clt`
+```json
+{
+  "cpf": "44151909877",
+  "email": "usuario@email.com",
+  "password": "senha123"
+}
+```
+
+### `POST /simular_corbanx_fgts`
+```json
+{
+  "cpf": "44151909877",
+  "email": "usuario@email.com",
+  "password": "senha123"
+}
+```
+
+## Response (sucesso)
+```json
+{
+  "resultado": "pre_aprovado",
+  "anotacao": "🔥 OPORTUNIDADE ENCONTRADA\n🏦 Banco Principal: HAPPY_CONSIG\n💰 Margem: R$ 299,13\n\n...",
+  "job_id": "abc-123",
+  "bancos_consultados": 8
+}
+```
+
+## Response (sem margem / erro / timeout)
+```json
+{
+  "resultado": "sem_margem|erro|timeout",
+  "anotacao": "..."
+}
+```
+
+## Bancos CLT consultados
+- HAPPY_CONSIG, MERCANTIL, DREX, CONSIGA, PRESENCA, BANCO_HUB, V8_DIGITAL, BANCO_PRATA_CELCOIN
+
+## Deploy no VPS
+
+```bash
+curl -sO https://raw.githubusercontent.com/rodrigomo-hub/corbanx-api/main/instalar.sh && bash instalar.sh
+```
+
+## Atualizar
+```bash
+cd /opt/corbanx-api && git pull && systemctl restart corbanx-api
+```
+
+## Logs
+```bash
+journalctl -u corbanx-api -f
+```
