@@ -32,10 +32,10 @@ BANKS_CLT = [
 ]
 
 BANKS_FGTS = [
-    "FGTS_BANK1",
-    "FGTS_BANK2",
-    "FGTS_BANK3",
-    "FGTS_BANK4"
+    "BANCO_PRATA_BMP",
+    "BANCO_PRATA_QITECH_FGTS",
+    "V8_DIGITAL_FGTS",
+    "NOVO_SAQUE_FGTS"
 ]
 
 POLLING_INTERVAL = 5
@@ -76,8 +76,8 @@ def cancelar_job(session: requests.Session, job_id: str, cpf_clean: str):
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0) -> tuple:
     responderam = {r.get("bank_name") for r in results}
     aprovados   = [r for r in results if r.get("status") == "COM_SALDO"]
-    reprovados  = [r for r in results if r.get("status") == "NAO_APROVADO"]
-    falhas      = [r for r in results if r.get("status") not in ("COM_SALDO", "NAO_APROVADO")]
+    reprovados  = [r for r in results if r.get("status") in ("NAO_APROVADO", "NAO_AUTORIZADO")]
+    falhas      = [r for r in results if r.get("status") not in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO")]
 
     def get_margem(r):
         try:
