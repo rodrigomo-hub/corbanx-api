@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CorbanX API - Wrapper multi-banco CLT + FGTS
-Porta: 8004 | v4.0.0
+Porta: 8004 | v4.1.0
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.0.0")
+app = FastAPI(title="CorbanX API", version="4.1.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -39,7 +39,7 @@ BANKS_FGTS = [
 ]
 
 POLLING_INTERVAL = 5
-POLLING_MAX = 24  # 24 x 5s = 120s (2 minutos)
+POLLING_MAX = 36  # 36 x 5s = 180s (3 minutos)
 
 
 # ─────────────────────────── MODELS ───────────────────────────
@@ -62,6 +62,17 @@ def formatar_cpf(cpf: str) -> str:
     return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
 
 
+def cancelar_job(session: requests.Session, job_id: str, cpf_clean: str):
+    try:
+        r = session.delete(
+            f"{BASE_URL}/api/multi-bank/cancel/{job_id}",
+            timeout=10
+        )
+        logger.info(f"[{cpf_clean}] Job cancelado: {job_id} | HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[{cpf_clean}] Erro ao cancelar job: {e}")
+
+
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0) -> tuple:
     responderam = {r.get("bank_name") for r in results}
     aprovados   = [r for r in results if r.get("status") == "COM_SALDO"]
@@ -82,7 +93,7 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     if parcial:
         responderam_n = len(results)
         total_n = total_banks if total_banks > 0 else responderam_n
-        linhas.append(f"⏱️ Consultado por 2 minutos — {responderam_n}/{total_n} bancos responderam")
+        linhas.append(f"⏱️ Consultado por 3 minutos — {responderam_n}/{total_n} bancos responderam")
         linhas.append("")
 
     if aprovados:
@@ -134,7 +145,7 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
         pendentes = [b for b in all_banks if b not in responderam]
         if pendentes:
             for b in pendentes:
-                linhas.append(f"⏳ {b} — não respondeu em 2 minutos (ignorado)")
+                linhas.append(f"⏳ {b} — não respondeu em 3 minutos (ignorado)")
 
     return resultado, "\n".join(linhas).strip()
 
@@ -145,6 +156,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
     cpf_clean = limpar_cpf(cpf)
     cpf_fmt   = formatar_cpf(cpf)
     session   = requests.Session()
+    job_id    = None
 
     # ── LOGIN ──
     logger.info(f"[{cpf_clean}] Login ({email})")
@@ -223,6 +235,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
             logger.info(f"[{cpf_clean}] Polling {attempt}/{POLLING_MAX}: {status} | {len(last_results)}/{len(banks)} bancos")
 
             if status == "completed":
+                cancelar_job(session, job_id, cpf_clean)
                 resultado, anotacao = montar_anotacao(last_results, tipo, parcial=False)
                 return {
                     "resultado": resultado,
@@ -234,6 +247,8 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
         except Exception as e:
             logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
 
+    # Timeout — cancela e retorna parcial
+    cancelar_job(session, job_id, cpf_clean)
     resultado, anotacao = montar_anotacao(last_results, tipo, parcial=True, total_banks=len(banks))
     return {
         "resultado": resultado,
@@ -247,7 +262,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.0.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.1.0"}
 
 
 @app.post("/simular_corbanx_clt")
