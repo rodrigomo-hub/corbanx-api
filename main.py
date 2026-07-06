@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CorbanX API - Wrapper multi-banco CLT + FGTS
-Porta: 8004
+Porta: 8004 | v4.0.0
 """
 
 import asyncio
@@ -15,19 +15,20 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="3.0.0")
+app = FastAPI(title="CorbanX API", version="4.0.0")
 
-BASE_URL = "https://cltx-backend-production.up.railway.app"
+BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
 BANKS_CLT = [
     "V8_DIGITAL",
     "BANCO_PRATA_CELCOIN",
     "BANCO_HUB",
+    "HAPPY_CONSIG",
     "DREX",
+    "NOVO_SAQUE_CLT",
     "PRESENCA",
-    "CONSIGA",
-    "MERCANTIL",
-    "HAPPY_CONSIG"
+    "FINTECH_DIGITAL",
+    "MERCANTIL"
 ]
 
 BANKS_FGTS = [
@@ -54,6 +55,11 @@ class ConsultaRequest(BaseModel):
 
 def limpar_cpf(cpf: str) -> str:
     return cpf.replace(".", "").replace("-", "").strip()
+
+
+def formatar_cpf(cpf: str) -> str:
+    c = limpar_cpf(cpf)
+    return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
 
 
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0) -> tuple:
@@ -133,11 +139,12 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     return resultado, "\n".join(linhas).strip()
 
 
-# ─────────────────────────── CORE SYNC (roda em thread) ───────
+# ─────────────────────────── CORE SYNC ────────────────────────
 
 def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) -> dict:
     cpf_clean = limpar_cpf(cpf)
-    session = requests.Session()
+    cpf_fmt   = formatar_cpf(cpf)
+    session   = requests.Session()
 
     # ── LOGIN ──
     logger.info(f"[{cpf_clean}] Login ({email})")
@@ -156,13 +163,18 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
 
     # ── CONSULTA ──
     payload = {
-        "cpf": cpf_clean,
-        "name": "", "birthDate": "", "motherName": "",
+        "cpf": cpf_fmt,
+        "name": "",
+        "birthDate": "",
+        "motherName": "",
         "productType": tipo,
         "selectedBanks": banks,
         "gender": "MASCULINO",
         "userIP": "189.126.131.81",
-        "phone": "", "email": ""
+        "phone": "",
+        "email": "",
+        "cep": "",
+        "clearCache": False
     }
 
     try:
@@ -235,7 +247,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "3.0.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.0.0"}
 
 
 @app.post("/simular_corbanx_clt")
