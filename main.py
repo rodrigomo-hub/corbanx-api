@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.1.0")
+app = FastAPI(title="CorbanX API", version="4.2.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -62,15 +62,6 @@ def formatar_cpf(cpf: str) -> str:
     return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
 
 
-def cancelar_job(session: requests.Session, job_id: str, cpf_clean: str):
-    try:
-        r = session.delete(
-            f"{BASE_URL}/api/multi-bank/cancel/{job_id}",
-            timeout=10
-        )
-        logger.info(f"[{cpf_clean}] Job cancelado: {job_id} | HTTP {r.status_code}")
-    except Exception as e:
-        logger.warning(f"[{cpf_clean}] Erro ao cancelar job: {e}")
 
 
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0) -> tuple:
@@ -186,12 +177,13 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
         "phone": "",
         "email": "",
         "cep": "",
-        "clearCache": False
+        "clearCache": False,
+        "maxWaitMs": 180000
     }
 
     try:
         consult_resp = session.post(
-            f"{BASE_URL}/api/multi-bank/consult",
+            f"{BASE_URL}/api/multi-bank/consult-managed",
             json=payload,
             timeout=30
         )
@@ -235,7 +227,6 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
             logger.info(f"[{cpf_clean}] Polling {attempt}/{POLLING_MAX}: {status} | {len(last_results)}/{len(banks)} bancos")
 
             if status == "completed":
-                cancelar_job(session, job_id, cpf_clean)
                 resultado, anotacao = montar_anotacao(last_results, tipo, parcial=False)
                 return {
                     "resultado": resultado,
@@ -247,8 +238,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
         except Exception as e:
             logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
 
-    # Timeout — cancela e retorna parcial
-    cancelar_job(session, job_id, cpf_clean)
+    # Timeout — retorna parcial
     resultado, anotacao = montar_anotacao(last_results, tipo, parcial=True, total_banks=len(banks))
     return {
         "resultado": resultado,
@@ -262,7 +252,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.1.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.2.0"}
 
 
 @app.post("/simular_corbanx_clt")
