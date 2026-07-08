@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.4.0")
+app = FastAPI(title="CorbanX API", version="4.4.1")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -64,6 +64,7 @@ class ConsultaEnergiaRequest(BaseModel):
     password: str
     nome: str
     cep: str
+    phone: Optional[str] = None
 
 
 # ─────────────────────────── HELPERS ──────────────────────────
@@ -105,6 +106,21 @@ def extrair_margem_presenca(r: dict) -> tuple:
         valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return margem, parcela, prazo, valor_liberado
     return margem, None, None, None
+
+
+def formatar_phone(phone: str) -> str:
+    """Normaliza telefone para (DD) 9XXXX-XXXX ou (DD) XXXX-XXXX"""
+    if not phone:
+        return ""
+    digits = ''.join(filter(str.isdigit, phone))
+    # Remove 55 do início se vier com DDI
+    if digits.startswith("55") and len(digits) > 11:
+        digits = digits[2:]
+    if len(digits) == 11:
+        return f"({digits[:2]}) {digits[2:7]}-{digits[7:]}"
+    elif len(digits) == 10:
+        return f"({digits[:2]}) {digits[2:6]}-{digits[6:]}"
+    return phone  # retorna original se não conseguir formatar
 
 
 def limpar_fila(session: requests.Session, cpf_clean: str):
@@ -321,7 +337,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.4.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.4.1"}
 
 
 @app.post("/simular_corbanx_clt")
@@ -338,5 +354,5 @@ async def simular_fgts(req: ConsultaRequest):
 
 @app.post("/simular_corbanx_energia")
 async def simular_energia(req: ConsultaEnergiaRequest):
-    extra = {"name": req.nome, "cep": req.cep}
+    extra = {"name": req.nome, "cep": req.cep, "phone": formatar_phone(req.phone or "")}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", BANKS_ENERGIA, extra)
