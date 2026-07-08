@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CorbanX API - Wrapper multi-banco CLT + FGTS
-Porta: 8004 | v4.1.0
+Porta: 8004 | v4.3.0
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.2.0")
+app = FastAPI(title="CorbanX API", version="4.3.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -35,11 +35,14 @@ BANKS_FGTS = [
     "BANCO_PRATA_BMP",
     "BANCO_PRATA_QITECH_FGTS",
     "V8_DIGITAL_FGTS",
-    "NOVO_SAQUE_FGTS"
+    "NOVO_SAQUE_FGTS",
+    "DSV",
+    "LOTUS"
 ]
 
 POLLING_INTERVAL = 5
-POLLING_MAX = 36  # 36 x 5s = 180s (3 minutos)
+POLLING_MAX = 36        # 36 x 5s = 180s (3 minutos)
+FILA_CHEIA_CHECKS = 24  # 24 x 5s = 120s (2 minutos) antes de considerar fila cheia
 
 
 # ─────────────────────────── MODELS ───────────────────────────
@@ -62,13 +65,52 @@ def formatar_cpf(cpf: str) -> str:
     return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
 
 
+def fix_status(status: str) -> str:
+    """Corrige status cortado que vem da API"""
+    if not status:
+        return "FALHA_CONSULTA"
+    s = status.upper()
+    if s in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO", "FALHA_CONSULTA"):
+        return s
+    if "SALDO" in s:
+        return "COM_SALDO"
+    if "APROVADO" in s:
+        return "NAO_APROVADO"
+    if "AUTORIZADO" in s:
+        return "NAO_AUTORIZADO"
+    return "FALHA_CONSULTA"
+
+
+def extrair_margem_presenca(r: dict) -> tuple:
+    """Extrai margem/parcela/prazo do PRESENCA via presenca_tabelas"""
+    margem = r.get("margem", "N/A")
+    parcela = None
+    prazo = None
+    tabelas = r.get("presenca_tabelas", [])
+    if tabelas:
+        melhor = sorted(tabelas, key=lambda t: t.get("valorLiberado", 0), reverse=True)[0]
+        parcela = f"R$ {melhor['valorParcela']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        prazo = str(melhor.get("prazo", ""))
+        liberado = melhor.get("valorLiberado", 0)
+        valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return margem, parcela, prazo, valor_liberado
+    return margem, None, None, None
+
+
+def limpar_fila(session: requests.Session, cpf_clean: str):
+    try:
+        r = session.delete(f"{BASE_URL}/api/multi-bank/queue", timeout=10)
+        data = r.json()
+        logger.info(f"[{cpf_clean}] Fila limpa: {data.get('message', '')}")
+    except Exception as e:
+        logger.warning(f"[{cpf_clean}] Erro ao limpar fila: {e}")
 
 
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0) -> tuple:
     responderam = {r.get("bank_name") for r in results}
-    aprovados   = [r for r in results if r.get("status") == "COM_SALDO"]
-    reprovados  = [r for r in results if r.get("status") in ("NAO_APROVADO", "NAO_AUTORIZADO")]
-    falhas      = [r for r in results if r.get("status") not in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO")]
+    aprovados   = [r for r in results if fix_status(r.get("status", "")) == "COM_SALDO"]
+    reprovados  = [r for r in results if fix_status(r.get("status", "")) in ("NAO_APROVADO", "NAO_AUTORIZADO")]
+    falhas      = [r for r in results if fix_status(r.get("status", "")) not in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO")]
 
     def get_margem(r):
         try:
@@ -102,18 +144,31 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     linhas.append(f"\n📊 Detalhamento CorbanX {tipo.upper()}\n")
 
     for r in aprovados:
-        banco   = r.get("bank_name", "?")
-        margem  = r.get("margem", "N/A")
-        parcela = r.get("valor_parcela") or r.get("saldo_24m")
-        prazo   = r.get("prazo")
-        nome    = r.get("name")
+        banco  = r.get("bank_name", "?")
+        nome   = r.get("name")
         linhas.append(f"✅ {banco}")
         if nome:
             linhas.append(f"Cliente: {nome}")
-        linhas.append(f"Margem: {margem}")
-        if parcela:
-            label = "Saldo 24m" if not r.get("valor_parcela") else "Parcela"
-            linhas.append(f"{label}: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
+
+        if banco == "PRESENCA":
+            margem, parcela, prazo, valor_liberado = extrair_margem_presenca(r)
+            linhas.append(f"Margem: {margem}")
+            if parcela:
+                linhas.append(f"Parcela: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
+            if valor_liberado:
+                linhas.append(f"Valor Liberado: {valor_liberado}")
+        else:
+            margem  = r.get("margem", "N/A")
+            parcela = r.get("valor_parcela") or r.get("saldo_24m")
+            prazo   = r.get("prazo")
+            valor_liberado = r.get("valor_liberado")
+            linhas.append(f"Margem: {margem}")
+            if parcela:
+                label = "Saldo 24m" if not r.get("valor_parcela") else "Parcela"
+                linhas.append(f"{label}: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
+            if valor_liberado:
+                linhas.append(f"Valor Liberado: {valor_liberado}")
+
         linhas.append("")
 
     for r in reprovados:
@@ -125,9 +180,8 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
 
     for r in falhas:
         banco  = r.get("bank_name", "?")
-        status = r.get("status", "FALHA")
         motivo = r.get("resultado") or "Erro desconhecido"
-        linhas.append(f"⚠️ {banco} ({status})")
+        linhas.append(f"⚠️ {banco} (FALHA_CONSULTA)")
         linhas.append(f"Motivo: {motivo}")
         linhas.append("")
 
@@ -143,11 +197,66 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
 
 # ─────────────────────────── CORE SYNC ────────────────────────
 
+def _polling(session, job_id, banks, cpf_clean, tipo, max_checks):
+    """Roda o polling e retorna (status, last_results, fila_cheia)"""
+    last_results = []
+    for attempt in range(1, max_checks + 1):
+        time.sleep(POLLING_INTERVAL)
+        try:
+            status_resp = session.get(
+                f"{BASE_URL}/api/multi-bank/status/{job_id}",
+                timeout=30
+            )
+            if status_resp.status_code in (401, 403):
+                logger.warning(f"[{cpf_clean}] Sessão expirada no polling")
+                return "erro_sessao", last_results, False
+
+            status_data  = status_resp.json()
+            status       = status_data.get("status", "processing")
+            last_results = status_data.get("results") or last_results
+
+            logger.info(f"[{cpf_clean}] Polling {attempt}/{max_checks}: {status} | {len(last_results)}/{len(banks)} bancos")
+
+            if status == "completed":
+                return "completed", last_results, False
+
+            # Detecta fila cheia: 2 minutos sem nenhum banco responder
+            if attempt == FILA_CHEIA_CHECKS and len(last_results) == 0:
+                logger.warning(f"[{cpf_clean}] Fila cheia detectada após {FILA_CHEIA_CHECKS * POLLING_INTERVAL}s")
+                return "fila_cheia", last_results, True
+
+        except Exception as e:
+            logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
+
+    return "timeout", last_results, False
+
+
+def _consultar(session, cpf_fmt, tipo, banks):
+    """Dispara a consulta e retorna job_id"""
+    payload = {
+        "cpf": cpf_fmt,
+        "name": "", "birthDate": "", "motherName": "",
+        "productType": tipo,
+        "selectedBanks": banks,
+        "userIP": "189.126.131.81",
+        "phone": "", "cep": "", "clearCache": False,
+        "maxWaitMs": 180000
+    }
+    resp = session.post(
+        f"{BASE_URL}/api/multi-bank/consult-managed",
+        json=payload,
+        timeout=30
+    )
+    if resp.status_code not in (200, 202):
+        return None, f"HTTP {resp.status_code}"
+    job_id = resp.json().get("jobId")
+    return job_id, None
+
+
 def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) -> dict:
     cpf_clean = limpar_cpf(cpf)
     cpf_fmt   = formatar_cpf(cpf)
     session   = requests.Session()
-    job_id    = None
 
     # ── LOGIN ──
     logger.info(f"[{cpf_clean}] Login ({email})")
@@ -165,81 +274,36 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
     logger.info(f"[{cpf_clean}] Login OK")
 
     # ── CONSULTA ──
-    payload = {
-        "cpf": cpf_fmt,
-        "name": "",
-        "birthDate": "",
-        "motherName": "",
-        "productType": tipo,
-        "selectedBanks": banks,
-        "gender": "MASCULINO",
-        "userIP": "189.126.131.81",
-        "phone": "",
-        "email": "",
-        "cep": "",
-        "clearCache": False,
-        "maxWaitMs": 180000
-    }
-
-    try:
-        consult_resp = session.post(
-            f"{BASE_URL}/api/multi-bank/consult-managed",
-            json=payload,
-            timeout=30
-        )
-        if consult_resp.status_code not in (200, 202):
-            return {"resultado": "erro", "anotacao": f"❌ Falha na consulta (HTTP {consult_resp.status_code})"}
-
-        job_id = consult_resp.json().get("jobId")
-        if not job_id:
-            return {"resultado": "erro", "anotacao": "❌ jobId não retornado pela CorbanX"}
-
-    except Exception as e:
-        return {"resultado": "erro", "anotacao": f"❌ Erro ao consultar: {e}"}
+    job_id, err = _consultar(session, cpf_fmt, tipo, banks)
+    if not job_id:
+        return {"resultado": "erro", "anotacao": f"❌ Falha na consulta: {err}"}
 
     logger.info(f"[{cpf_clean}] JobId: {job_id}")
 
-    # ── POLLING ──
-    last_results = []
+    # ── POLLING (tentativa 1) ──
+    status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, tipo, POLLING_MAX)
 
-    for attempt in range(1, POLLING_MAX + 1):
-        time.sleep(POLLING_INTERVAL)
-        try:
-            status_resp = session.get(
-                f"{BASE_URL}/api/multi-bank/status/{job_id}",
-                timeout=30
-            )
+    # ── FILA CHEIA → LIMPA E REFAZ ──
+    if fila_cheia:
+        logger.info(f"[{cpf_clean}] Limpando fila e refazendo consulta...")
+        limpar_fila(session, cpf_clean)
+        time.sleep(2)
 
-            if status_resp.status_code in (401, 403):
-                logger.warning(f"[{cpf_clean}] Sessão expirada, re-login...")
-                session.post(
-                    f"{BASE_URL}/api/auth/login",
-                    json={"email": email, "password": password},
-                    timeout=15
-                )
-                logger.info(f"[{cpf_clean}] Re-login OK")
-                continue
+        job_id, err = _consultar(session, cpf_fmt, tipo, banks)
+        if not job_id:
+            return {"resultado": "erro", "anotacao": f"❌ Falha na segunda consulta após limpar fila: {err}"}
 
-            status_data  = status_resp.json()
-            status       = status_data.get("status", "processing")
-            last_results = status_data.get("results") or last_results
+        logger.info(f"[{cpf_clean}] Segunda tentativa JobId: {job_id}")
+        status, last_results, _ = _polling(session, job_id, banks, cpf_clean, tipo, POLLING_MAX)
 
-            logger.info(f"[{cpf_clean}] Polling {attempt}/{POLLING_MAX}: {status} | {len(last_results)}/{len(banks)} bancos")
+    # ── RESULTADO ──
+    if status == "completed":
+        resultado, anotacao = montar_anotacao(last_results, tipo, parcial=False)
+    elif status == "erro_sessao":
+        return {"resultado": "erro", "anotacao": "❌ Sessão expirada durante consulta"}
+    else:
+        resultado, anotacao = montar_anotacao(last_results, tipo, parcial=True, total_banks=len(banks))
 
-            if status == "completed":
-                resultado, anotacao = montar_anotacao(last_results, tipo, parcial=False)
-                return {
-                    "resultado": resultado,
-                    "anotacao": anotacao,
-                    "job_id": job_id,
-                    "bancos_consultados": len(last_results)
-                }
-
-        except Exception as e:
-            logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
-
-    # Timeout — retorna parcial
-    resultado, anotacao = montar_anotacao(last_results, tipo, parcial=True, total_banks=len(banks))
     return {
         "resultado": resultado,
         "anotacao": anotacao,
@@ -252,7 +316,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list) 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.2.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.3.0"}
 
 
 @app.post("/simular_corbanx_clt")
