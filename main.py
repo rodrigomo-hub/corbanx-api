@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.4.1")
+app = FastAPI(title="CorbanX API", version="4.5.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -46,7 +46,8 @@ POLLING_INTERVAL = 5
 POLLING_MAX = 36        # 36 x 5s = 180s (3 minutos)
 FILA_CHEIA_CHECKS = 24  # 24 x 5s = 120s (2 minutos)
 
-STATUS_NEGADOS = ("NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO")
+STATUS_NEGADOS = ("NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO", "SEM_AUTORIZACAO")
+STATUS_SEM_AUTORIZACAO = ("NAO_AUTORIZADO", "SEM_AUTORIZACAO")
 
 
 # ─────────────────────────── MODELS ───────────────────────────
@@ -82,7 +83,7 @@ def fix_status(status: str) -> str:
     if not status:
         return "FALHA_CONSULTA"
     s = status.upper()
-    if s in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO", "FALHA_CONSULTA"):
+    if s in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO", "SEM_AUTORIZACAO", "FALHA_CONSULTA"):
         return s
     if "COM_SALDO" in s or "SALDO" in s and "SEM" not in s:
         return "COM_SALDO"
@@ -176,7 +177,10 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
         if nome:
             linhas.append(f"Cliente: {nome}")
 
-        if banco == "PRESENCA":
+        if tipo == "FGTS":
+            saldo = r.get("margem", "N/A")
+            linhas.append(f"Saldo: {saldo}")
+        elif banco == "PRESENCA":
             margem, parcela, prazo, valor_liberado = extrair_margem_presenca(r)
             linhas.append(f"Margem: {margem}")
             if parcela:
@@ -218,6 +222,29 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
                 linhas.append(f"⏳ {b} — não respondeu em 3 minutos (ignorado)")
 
     return resultado, "\n".join(linhas).strip()
+
+
+def definir_resultado_fgts(results: list) -> str:
+    """
+    Inteligência FGTS:
+    - COM_SALDO em qualquer banco → pre_aprovado
+    - SEM_SALDO em qualquer banco → sem_saldo (prioridade sobre autorização)
+    - Todos NAO_AUTORIZADO/SEM_AUTORIZACAO → aguardando_autorizacao
+    """
+    statuses = [fix_status(r.get("status", "")) for r in results]
+
+    if "COM_SALDO" in statuses:
+        return "pre_aprovado"
+
+    if "SEM_SALDO" in statuses:
+        return "sem_saldo"
+
+    if all(s in STATUS_SEM_AUTORIZACAO for s in statuses if s not in ("FALHA_CONSULTA", "NAO_APROVADO")):
+        autorizacao = [s for s in statuses if s in STATUS_SEM_AUTORIZACAO]
+        if autorizacao:
+            return "aguardando_autorizacao"
+
+    return "sem_saldo"
 
 
 # ─────────────────────────── CORE ─────────────────────────────
@@ -325,6 +352,10 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
         total_banks=len(banks),
         all_banks=banks
     )
+
+    # Sobrescreve resultado com inteligência FGTS
+    if tipo == "FGTS" and last_results:
+        resultado = definir_resultado_fgts(last_results)
     return {
         "resultado": resultado,
         "anotacao": anotacao,
@@ -337,7 +368,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.4.1"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.5.0"}
 
 
 @app.post("/simular_corbanx_clt")
