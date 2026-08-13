@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.5.0")
+app = FastAPI(title="CorbanX API", version="4.6.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -368,7 +368,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.5.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.6.0"}
 
 
 @app.post("/simular_corbanx_clt")
