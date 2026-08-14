@@ -173,6 +173,12 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     for r in aprovados:
         banco = r.get("bank_name", "?")
         nome  = r.get("name")
+        # Log temporário (13/08) — pra descobrir os nomes de campo reais
+        # que cada banco usa (ex: MERCANTIL não usava valor_parcela/
+        # saldo_24m/prazo/valor_liberado como os "genéricos", igual já
+        # sabíamos que acontecia com PRESENCA). Remove depois de
+        # confirmado o nome certo dos campos.
+        logger.info(f"[{banco}] dado bruto do banco aprovado: {r}")
         linhas.append(f"✅ {banco}")
         if nome:
             linhas.append(f"Cliente: {nome}")
