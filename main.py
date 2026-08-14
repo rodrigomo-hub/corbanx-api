@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.7.0")
+app = FastAPI(title="CorbanX API", version="4.8.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -333,14 +333,13 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
     status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, POLLING_MAX)
 
     if fila_cheia:
-        logger.info(f"[{cpf_clean}] Limpando fila e refazendo...")
-        limpar_fila(session, cpf_clean)
-        time.sleep(2)
-        job_id, err = _consultar(session, payload)
-        if not job_id:
-            return {"resultado": "erro", "anotacao": f"❌ Falha na segunda consulta: {err}"}
-        logger.info(f"[{cpf_clean}] Segunda tentativa JobId: {job_id}")
-        status, last_results, _ = _polling(session, job_id, banks, cpf_clean, POLLING_MAX)
+        logger.warning(f"[{cpf_clean}] Fila cheia detectada — retornando fila_cheia para retry")
+        return {
+            "resultado": "fila_cheia",
+            "anotacao": "⏳ Fila de consultas cheia, tente novamente em alguns segundos",
+            "job_id": job_id,
+            "bancos_consultados": 0
+        }
 
     if status == "erro_sessao":
         return {"resultado": "erro", "anotacao": "❌ Sessão expirada durante consulta"}
@@ -399,7 +398,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.7.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.8.0"}
 
 
 @app.post("/simular_corbanx_clt")
