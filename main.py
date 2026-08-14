@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.6.0")
+app = FastAPI(title="CorbanX API", version="4.7.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -366,9 +366,40 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 
 # ─────────────────────────── ENDPOINTS ────────────────────────
 
+class LimparFilaRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/limpar_fila")
+async def endpoint_limpar_fila(req: LimparFilaRequest):
+    """Limpa a fila do usuário na CorbanX"""
+    def _limpar():
+        session = requests.Session()
+        try:
+            login_resp = session.post(
+                f"{BASE_URL}/api/auth/login",
+                json={"email": req.email, "password": req.password},
+                timeout=15
+            )
+            if login_resp.status_code not in (200, 201):
+                return {"status": "erro", "message": f"Falha no login (HTTP {login_resp.status_code})"}
+        except Exception as e:
+            return {"status": "erro", "message": f"Erro de conexão: {e}"}
+
+        try:
+            r = session.delete(f"{BASE_URL}/api/multi-bank/queue", timeout=10)
+            data = r.json()
+            return {"status": "ok", "removed": data.get("removed", 0), "message": data.get("message", "")}
+        except Exception as e:
+            return {"status": "erro", "message": f"Erro ao limpar fila: {e}"}
+
+    return await asyncio.to_thread(_limpar)
+
+
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.6.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.7.0"}
 
 
 @app.post("/simular_corbanx_clt")
