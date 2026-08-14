@@ -109,6 +109,31 @@ def extrair_margem_presenca(r: dict) -> tuple:
     return margem, None, None, None
 
 
+def extrair_oferta_mercantil(r: dict) -> tuple:
+    """Mercantil não usa os campos genéricos (valor_parcela/prazo/
+    valor_liberado no nível raiz) — vem estruturado em
+    mercantil_simulacao.tabelaFlexivel[].prestacao[], cada tabela pode
+    ter mais de uma opção de prestação. Achado em produção (14/08) —
+    Rodrigo reportou que o texto da oferta pro Mercantil só mostrava
+    margem, sem parcela/prazo/valor liberado. Mesmo padrão de tratamento
+    especial já usado pro PRESENCA (extrair_margem_presenca) — cada
+    banco pode estruturar a resposta diferente."""
+    margem = r.get("margem", "N/A")
+    simulacao = r.get("mercantil_simulacao") or {}
+    tabelas = simulacao.get("tabelaFlexivel") or []
+    todas_prestacoes = []
+    for tabela in tabelas:
+        todas_prestacoes.extend(tabela.get("prestacao") or [])
+    if todas_prestacoes:
+        melhor = sorted(todas_prestacoes, key=lambda p: p.get("valorLiberado", 0) or 0, reverse=True)[0]
+        parcela = f"R$ {melhor['valorParcela']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        prazo = str(melhor.get("quantidadeParcelas", ""))
+        liberado = melhor.get("valorLiberado", 0)
+        valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return margem, parcela, prazo, valor_liberado
+    return margem, None, None, None
+
+
 def formatar_phone(phone: str) -> str:
     """Normaliza telefone para (DD) 9XXXX-XXXX ou (DD) XXXX-XXXX"""
     if not phone:
@@ -173,12 +198,6 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     for r in aprovados:
         banco = r.get("bank_name", "?")
         nome  = r.get("name")
-        # Log temporário (13/08) — pra descobrir os nomes de campo reais
-        # que cada banco usa (ex: MERCANTIL não usava valor_parcela/
-        # saldo_24m/prazo/valor_liberado como os "genéricos", igual já
-        # sabíamos que acontecia com PRESENCA). Remove depois de
-        # confirmado o nome certo dos campos.
-        logger.info(f"[{banco}] dado bruto do banco aprovado: {r}")
         linhas.append(f"✅ {banco}")
         if nome:
             linhas.append(f"Cliente: {nome}")
@@ -188,6 +207,13 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
             linhas.append(f"Saldo: {saldo}")
         elif banco == "PRESENCA":
             margem, parcela, prazo, valor_liberado = extrair_margem_presenca(r)
+            linhas.append(f"Margem: {margem}")
+            if parcela:
+                linhas.append(f"Parcela: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
+            if valor_liberado:
+                linhas.append(f"Valor Liberado: {valor_liberado}")
+        elif banco == "MERCANTIL":
+            margem, parcela, prazo, valor_liberado = extrair_oferta_mercantil(r)
             linhas.append(f"Margem: {margem}")
             if parcela:
                 linhas.append(f"Parcela: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
