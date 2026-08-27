@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.8.0")
+app = FastAPI(title="CorbanX API", version="4.9.0")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -57,6 +57,7 @@ class ConsultaRequest(BaseModel):
     email: str
     password: str
     banks: Optional[List[str]] = None
+    base_url: Optional[str] = None
 
 
 class ConsultaEnergiaRequest(BaseModel):
@@ -66,6 +67,7 @@ class ConsultaEnergiaRequest(BaseModel):
     nome: str
     cep: str
     phone: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 # ─────────────────────────── HELPERS ──────────────────────────
@@ -151,7 +153,7 @@ def formatar_phone(phone: str) -> str:
 
 def limpar_fila(session: requests.Session, cpf_clean: str):
     try:
-        r = session.delete(f"{BASE_URL}/api/multi-bank/queue", timeout=10)
+        r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
         data = r.json()
         logger.info(f"[{cpf_clean}] Fila limpa: {data.get('message', '')}")
     except Exception as e:
@@ -286,7 +288,7 @@ def _polling(session, job_id, banks, cpf_clean, max_checks):
     for attempt in range(1, max_checks + 1):
         time.sleep(POLLING_INTERVAL)
         try:
-            sr = session.get(f"{BASE_URL}/api/multi-bank/status/{job_id}", timeout=30)
+            sr = session.get(f"{api_url}/api/multi-bank/status/{job_id}", timeout=30)
             if sr.status_code in (401, 403):
                 return "erro_sessao", last_results, False
 
@@ -311,7 +313,7 @@ def _polling(session, job_id, banks, cpf_clean, max_checks):
 
 def _consultar(session, payload):
     resp = session.post(
-        f"{BASE_URL}/api/multi-bank/consult-managed",
+        f"{api_url}/api/multi-bank/consult-managed",
         json=payload,
         timeout=30
     )
@@ -323,7 +325,7 @@ def _consultar(session, payload):
 def _login(session, email, password, cpf_clean):
     try:
         r = session.post(
-            f"{BASE_URL}/api/auth/login",
+            f"{api_url}/api/auth/login",
             json={"email": email, "password": password},
             timeout=15
         )
@@ -335,10 +337,11 @@ def _login(session, email, password, cpf_clean):
         return False
 
 
-def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, extra_payload: dict = None) -> dict:
+def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, extra_payload: dict = None, base_url: str = None) -> dict:
     cpf_clean = limpar_cpf(cpf)
     cpf_fmt   = formatar_cpf(cpf)
     session   = requests.Session()
+    api_url   = base_url.rstrip("/") if base_url else BASE_URL
 
     logger.info(f"[{cpf_clean}] Login ({email})")
     if not _login(session, email, password, cpf_clean):
@@ -400,6 +403,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 class LimparFilaRequest(BaseModel):
     email: str
     password: str
+    base_url: Optional[str] = None
 
 
 @app.post("/limpar_fila")
@@ -409,7 +413,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
         session = requests.Session()
         try:
             login_resp = session.post(
-                f"{BASE_URL}/api/auth/login",
+                f"{api_url}/api/auth/login",
                 json={"email": req.email, "password": req.password},
                 timeout=15
             )
@@ -419,7 +423,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
             return {"status": "erro", "message": f"Erro de conexão: {e}"}
 
         try:
-            r = session.delete(f"{BASE_URL}/api/multi-bank/queue", timeout=10)
+            r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
             data = r.json()
             return {"status": "ok", "removed": data.get("removed", 0), "message": data.get("message", "")}
         except Exception as e:
@@ -430,22 +434,22 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.8.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.9.0"}
 
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
     banks = req.banks or BANKS_CLT
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks)
+    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, None, req.base_url)
 
 
 @app.post("/simular_corbanx_fgts")
 async def simular_fgts(req: ConsultaRequest):
     banks = req.banks or BANKS_FGTS
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks)
+    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, None, req.base_url)
 
 
 @app.post("/simular_corbanx_energia")
 async def simular_energia(req: ConsultaEnergiaRequest):
     extra = {"name": req.nome, "cep": req.cep, "phone": formatar_phone(req.phone or "")}
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", BANKS_ENERGIA, extra)
+    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", BANKS_ENERGIA, extra, req.base_url)
