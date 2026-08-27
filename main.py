@@ -15,19 +15,19 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.9.3")
+app = FastAPI(title="CorbanX API", version="4.9.4")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
 BANKS_CLT = [
     "V8_DIGITAL",
     "BANCO_PRATA_CELCOIN",
-    "BANCO_HUB",
-    "HAPPY_CONSIG",
-    "DREX",
     "NOVO_SAQUE_CLT",
     "PRESENCA",
-    "FINTECH_DIGITAL",
+    "CREFAZ",
+    "VCTEX",
+    "TITAN",
+    "C6_BANK",
     "MERCANTIL"
 ]
 
@@ -366,7 +366,9 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
         "selectedBanks": banks,
         "userIP": "189.126.131.81",
         "phone": "", "cep": "", "clearCache": False,
-        "maxWaitMs": 180000
+        "maxWaitMs": 180000,
+        "titanOperationalSystem": "Windows",
+        "titanDeviceModel": "Desktop Windows"
     }
     if extra_payload:
         payload.update(extra_payload)
@@ -445,7 +447,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.9.3"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.9.4"}
 
 
 @app.post("/simular_corbanx_clt")
