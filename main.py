@@ -635,12 +635,32 @@ async def painel():
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
   .badge-on  { background: #064e3b; color: #34d399; border: 1px solid #065f46; }
   .badge-off { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
-  .btn-primary { background: #6366f1; hover:background:#4f46e5; color:white; }
   input, select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; width: 100%; }
-  input:focus, select:focus { outline: none; border-color: #6366f1; }
+  input:focus { outline: none; border-color: #6366f1; }
 </style>
 </head>
-<body class="text-slate-200 min-h-screen p-6">
+<body class="text-slate-200 min-h-screen">
+
+<!-- TELA DE LOGIN -->
+<div id="loginScreen" class="min-h-screen flex items-center justify-center p-4">
+  <div class="card p-8 w-full max-w-sm">
+    <div class="flex flex-col items-center mb-6">
+      <div class="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center text-3xl mb-3">🏦</div>
+      <h1 class="text-xl font-bold text-white">CorbanX Admin</h1>
+      <p class="text-slate-400 text-sm">Painel de controle</p>
+    </div>
+    <div class="space-y-3">
+      <input id="loginToken" type="password" placeholder="Token de acesso" onkeydown="if(event.key==='Enter')doLogin()" />
+      <button onclick="doLogin()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-medium transition">
+        Entrar
+      </button>
+      <p id="loginError" class="text-red-400 text-xs text-center hidden">Token inválido</p>
+    </div>
+  </div>
+</div>
+
+<!-- PAINEL PRINCIPAL -->
+<div id="mainPanel" class="hidden p-6">
 
 <!-- Header -->
 <div class="flex items-center justify-between mb-8">
@@ -651,14 +671,11 @@ async def painel():
       <p class="text-xs text-slate-400">Dashboard de consultas</p>
     </div>
   </div>
-  <div class="flex items-center gap-2">
-    <input id="adminToken" type="password" placeholder="Token admin" class="text-sm w-48" />
-    <button onclick="loadAll()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-lg transition">Entrar</button>
-  </div>
+  <button onclick="doLogout()" class="text-slate-400 hover:text-white text-sm transition">Sair →</button>
 </div>
 
 <!-- Stats Cards -->
-<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="statsCards">
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
   <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Consultas Hoje</p><p class="text-3xl font-bold text-white" id="statTotal">—</p></div>
   <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Pré-aprovados</p><p class="text-3xl font-bold text-emerald-400" id="statAprovados">—</p></div>
   <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Taxa Aprovação</p><p class="text-3xl font-bold text-indigo-400" id="statTaxa">—</p></div>
@@ -666,24 +683,17 @@ async def painel():
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-
-  <!-- Gráfico por dia -->
   <div class="card p-4 lg:col-span-2">
     <h2 class="text-sm font-semibold text-slate-300 mb-4">📈 Consultas por dia</h2>
     <canvas id="chartDia" height="120"></canvas>
   </div>
-
-  <!-- Por empresa -->
   <div class="card p-4">
     <h2 class="text-sm font-semibold text-slate-300 mb-4">🏢 Por empresa (hoje)</h2>
     <div id="empresaList" class="space-y-2 text-sm"></div>
   </div>
-
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-  <!-- Credenciais -->
   <div class="card p-4">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-sm font-semibold text-slate-300">🔑 Credenciais</h2>
@@ -692,14 +702,13 @@ async def painel():
     </div>
     <div id="credList" class="space-y-2"></div>
   </div>
-
-  <!-- Log recente -->
   <div class="card p-4">
     <h2 class="text-sm font-semibold text-slate-300 mb-4">📋 Últimas consultas</h2>
-    <div id="logList" class="space-y-1 text-xs"></div>
+    <div id="logList" class="space-y-1 text-xs text-slate-400">Em breve...</div>
   </div>
-
 </div>
+
+</div><!-- fim mainPanel -->
 
 <!-- Modal Add Credencial -->
 <div id="modalAdd" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
@@ -720,7 +729,31 @@ async def painel():
 <script>
 let chartInstance = null;
 
-function token() { return document.getElementById('adminToken').value; }
+function savedToken() { return localStorage.getItem('corbanx_token') || ''; }
+
+async function doLogin() {
+  const t = document.getElementById('loginToken').value.trim();
+  if (!t) return;
+  const r = await fetch(`/admin/credenciais?admin_token=${t}`);
+  if (r.ok) {
+    localStorage.setItem('corbanx_token', t);
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('mainPanel').classList.remove('hidden');
+    document.getElementById('loginError').classList.add('hidden');
+    loadAll();
+  } else {
+    document.getElementById('loginError').classList.remove('hidden');
+  }
+}
+
+function doLogout() {
+  localStorage.removeItem('corbanx_token');
+  document.getElementById('mainPanel').classList.add('hidden');
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('loginToken').value = '';
+}
+
+function token() { return savedToken(); }
 
 async function loadAll() {
   await Promise.all([loadStats(), loadCredenciais()]);
@@ -728,15 +761,13 @@ async function loadAll() {
 
 async function loadStats() {
   const r = await fetch(`/admin/stats?admin_token=${token()}&dias=7`);
-  if (!r.ok) { alert('Token inválido'); return; }
+  if (!r.ok) return;
   const d = await r.json();
-
   document.getElementById('statTotal').textContent = d.hoje.total;
   document.getElementById('statAprovados').textContent = d.hoje.aprovados;
   document.getElementById('statTaxa').textContent = d.hoje.taxa + '%';
   document.getElementById('statTempo').textContent = d.hoje.tempo_medio + 's';
 
-  // Gráfico
   const dias   = d.por_dia.map(x => x.dia).reverse();
   const totais = d.por_dia.map(x => x.total).reverse();
   const aprov  = d.por_dia.map(x => x.aprovados).reverse();
@@ -750,19 +781,17 @@ async function loadStats() {
         { label: 'Aprovados', data: aprov, backgroundColor: '#34d399aa', borderRadius: 4 }
       ]
     },
-    options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8', font: {size:11} } } },
-      scales: { x: { ticks: {color:'#94a3b8'}, grid:{color:'#1e293b'} }, y: { ticks:{color:'#94a3b8'}, grid:{color:'#334155'} } } }
+    options: { responsive: true,
+      plugins: { legend: { labels: { color: '#94a3b8', font: {size:11} } } },
+      scales: { x: { ticks:{color:'#94a3b8'}, grid:{color:'#1e293b'} }, y: { ticks:{color:'#94a3b8'}, grid:{color:'#334155'} } }
+    }
   });
 
-  // Empresas
   const el = document.getElementById('empresaList');
   el.innerHTML = d.por_empresa.length ? d.por_empresa.map(e => `
     <div class="flex items-center justify-between py-1.5 border-b border-slate-700">
       <span class="text-slate-300 truncate max-w-[120px]">${e.empresa}</span>
-      <div class="flex gap-2 text-right">
-        <span class="text-white font-medium">${e.total}</span>
-        <span class="text-emerald-400">${e.taxa}%</span>
-      </div>
+      <div class="flex gap-2"><span class="text-white font-medium">${e.total}</span><span class="text-emerald-400">${e.taxa}%</span></div>
     </div>`).join('') : '<p class="text-slate-500 text-xs">Sem consultas hoje</p>';
 }
 
@@ -781,10 +810,8 @@ async function loadCredenciais() {
         <span class="text-xs px-2 py-0.5 rounded-full ${c.ativo ? 'badge-on' : 'badge-off'}">${c.ativo ? 'ON' : 'OFF'}</span>
         <button onclick="toggleCredencial(${c.id}, ${c.ativo})"
           class="text-xs px-2 py-1 rounded ${c.ativo ? 'bg-slate-700 hover:bg-red-900' : 'bg-slate-700 hover:bg-emerald-900'} transition">
-          ${c.ativo ? 'Pausar' : 'Ativar'}
-        </button>
-        <button onclick="deleteCredencial(${c.id})"
-          class="text-xs px-2 py-1 rounded bg-slate-700 hover:bg-red-900 transition">🗑</button>
+          ${c.ativo ? 'Pausar' : 'Ativar'}</button>
+        <button onclick="deleteCredencial(${c.id})" class="text-xs px-2 py-1 rounded bg-slate-700 hover:bg-red-900 transition">🗑</button>
       </div>
     </div>`).join('') || '<p class="text-slate-500 text-xs">Nenhuma credencial cadastrada</p>';
 }
@@ -794,8 +821,7 @@ async function addCredencial() {
   const password = document.getElementById('newPassword').value;
   if (!email || !password) { alert('Preencha email e senha'); return; }
   const r = await fetch('/admin/credenciais', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
+    method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({email, password, admin_token: token()})
   });
   const d = await r.json();
@@ -809,8 +835,7 @@ async function addCredencial() {
 
 async function toggleCredencial(id, ativo) {
   await fetch(`/admin/credenciais/${id}`, {
-    method: 'PATCH',
-    headers: {'Content-Type':'application/json'},
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({admin_token: token(), ativo: ativo ? 0 : 1})
   });
   loadCredenciais();
@@ -823,7 +848,22 @@ async function deleteCredencial(id) {
 }
 
 // Auto-refresh a cada 30s
-setInterval(() => { if (token()) loadAll(); }, 30000);
+setInterval(() => { if (savedToken() && !document.getElementById('mainPanel').classList.contains('hidden')) loadAll(); }, 30000);
+
+// Verifica token salvo ao carregar
+window.onload = async () => {
+  const t = savedToken();
+  if (t) {
+    const r = await fetch(`/admin/credenciais?admin_token=${t}`);
+    if (r.ok) {
+      document.getElementById('loginScreen').classList.add('hidden');
+      document.getElementById('mainPanel').classList.remove('hidden');
+      loadAll();
+    } else {
+      localStorage.removeItem('corbanx_token');
+    }
+  }
+};
 </script>
 </body>
 </html>"""
