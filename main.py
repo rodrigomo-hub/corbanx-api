@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.9.0")
+app = FastAPI(title="CorbanX API", version="4.9.1")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -342,6 +342,13 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
     cpf_fmt   = formatar_cpf(cpf)
     session   = requests.Session()
     api_url   = base_url.rstrip("/") if base_url else BASE_URL
+    session.headers.update({
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json",
+        "origin": api_url,
+        "referer": f"{api_url}/login",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+    })
 
     logger.info(f"[{cpf_clean}] Login ({email})")
     if not _login(session, email, password, cpf_clean):
@@ -434,7 +441,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.9.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.9.1"}
 
 
 @app.post("/simular_corbanx_clt")
