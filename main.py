@@ -667,7 +667,11 @@ async def get_logs(admin_token: str, linhas: int = 100):
             ["journalctl", "-u", "corbanx-api", f"-n{linhas}", "--no-pager", "--output=short"],
             capture_output=True, text=True, timeout=10
         )
-        return {"logs": result.stdout}
+        keywords = ["Login OK", "Login (", "JobId", "completed", "Fila cheia", "ERROR",
+                    "Falha", "fila_cheia", "pre_aprovado", "sem_margem", "Re-login", "Polling 1/"]
+        lines = result.stdout.split("\n")
+        filtered = [l for l in lines if any(k in l for k in keywords)]
+        return {"logs": "\n".join(filtered)}
     except Exception as e:
         return {"logs": str(e)}
 
