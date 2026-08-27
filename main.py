@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.9.1")
+app = FastAPI(title="CorbanX API", version="4.9.2")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -322,10 +322,11 @@ def _consultar(session, payload):
     return resp.json().get("jobId"), None
 
 
-def _login(session, email, password, cpf_clean):
+def _login(session, email, password, cpf_clean, api_url=None):
+    url = api_url or BASE_URL
     try:
         r = session.post(
-            f"{api_url}/api/auth/login",
+            f"{url}/api/auth/login",
             json={"email": email, "password": password},
             timeout=15
         )
@@ -351,7 +352,7 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
     })
 
     logger.info(f"[{cpf_clean}] Login ({email})")
-    if not _login(session, email, password, cpf_clean):
+    if not _login(session, email, password, cpf_clean, api_url):
         return {"resultado": "erro", "anotacao": "❌ Falha no login"}
     logger.info(f"[{cpf_clean}] Login OK")
 
@@ -441,7 +442,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.9.1"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.9.2"}
 
 
 @app.post("/simular_corbanx_clt")
