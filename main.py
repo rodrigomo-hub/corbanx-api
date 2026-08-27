@@ -618,6 +618,59 @@ async def stats(admin_token: str, dias: int = 7):
                          "total": r[2], "falhas": r[3]} for r in credenciais]
     }
 
+# ─────────────────────────── ADMIN: CONSULTAS + LOGS ──────────
+
+@app.get("/admin/consultas")
+async def listar_consultas(admin_token: str, empresa: str = None, resultado: str = None,
+                            periodo: str = "hoje", limit: int = 200):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    where = []
+    params = []
+    if periodo == "hoje":
+        where.append("date(criado_em)=date('now','localtime')")
+    elif periodo == "7dias":
+        where.append("criado_em >= date('now','localtime','-7 days')")
+    elif periodo == "30dias":
+        where.append("criado_em >= date('now','localtime','-30 days')")
+    if empresa:
+        where.append("empresa=?")
+        params.append(empresa)
+    if resultado:
+        where.append("resultado=?")
+        params.append(resultado)
+    sql = "SELECT id, empresa, cpf, tipo, resultado, credencial_email, tempo_segundos, bancos_consultados, criado_em FROM consultas"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with get_db() as db:
+        rows = db.execute(sql, params).fetchall()
+    return [{"id": r[0], "empresa": r[1], "cpf": r[2], "tipo": r[3], "resultado": r[4],
+             "credencial": r[5], "tempo": r[6], "bancos": r[7], "criado_em": r[8]} for r in rows]
+
+@app.get("/admin/empresas")
+async def listar_empresas(admin_token: str):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    with get_db() as db:
+        rows = db.execute("SELECT DISTINCT empresa FROM consultas ORDER BY empresa").fetchall()
+    return [r[0] for r in rows]
+
+@app.get("/admin/logs")
+async def get_logs(admin_token: str, linhas: int = 100):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "corbanx-api", f"-n{linhas}", "--no-pager", "--output=short"],
+            capture_output=True, text=True, timeout=10
+        )
+        return {"logs": result.stdout}
+    except Exception as e:
+        return {"logs": str(e)}
+
 # ─────────────────────────── FRONTEND ─────────────────────────
 
 @app.get("/painel", response_class=HTMLResponse)
