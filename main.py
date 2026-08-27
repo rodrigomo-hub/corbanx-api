@@ -16,7 +16,7 @@ import random
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="5.0.3")
+app = FastAPI(title="CorbanX API", version="5.0.4")
 
 API_TOKEN = "f4527e02f3a1cf14f9e9212d556a749f08926e456329e98db2e2d98723d435ac"
 
@@ -30,7 +30,6 @@ BANKS_CLT = [
     "CREFAZ",
     "VCTEX",
     "TITAN",
-    "C6_BANK",
     "MERCANTIL"
 ]
 
@@ -62,7 +61,7 @@ class ConsultaRequest(BaseModel):
     token: str
     banks: Optional[List[str]] = None
     base_url: Optional[str] = None
-    name: Optional[str] = "Cliente"
+    name: Optional[str] = "CLIENTE CORBAN"
     phone: Optional[str] = None
 
 
@@ -495,7 +494,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "5.0.3"}
+    return {"status": "online", "service": "corbanx-api", "version": "5.0.4"}
 
 
 @app.post("/simular_corbanx_clt")
@@ -503,7 +502,7 @@ async def simular_clt(req: ConsultaRequest):
     if req.token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_CLT
-    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
+    extra = {"name": req.name or "CLIENTE CORBAN", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, extra, req.base_url)
 
 
@@ -512,7 +511,7 @@ async def simular_fgts(req: ConsultaRequest):
     if req.token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_FGTS
-    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
+    extra = {"name": req.name or "CLIENTE CORBAN", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, extra, req.base_url)
 
 
