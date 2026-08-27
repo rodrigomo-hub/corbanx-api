@@ -430,9 +430,8 @@ def _executar_sync(cpf: str, tipo: str, banks: list, extra_payload: dict, empres
         status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, api_url, POLLING_MAX)
 
         if fila_cheia:
-            # Tenta limpar e usar próxima credencial
+            # Fila cheia NÃO é falha da credencial — só tenta a próxima
             _limpar_fila(session, api_url, cpf_clean)
-            registrar_uso(cred_id, False)
             continue
 
         registrar_uso(cred_id, True)
