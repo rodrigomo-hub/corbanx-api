@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.9.2")
+app = FastAPI(title="CorbanX API", version="4.9.3")
 
 BASE_URL = "https://corbanx-api-prod.up.railway.app"
 
@@ -151,9 +151,10 @@ def formatar_phone(phone: str) -> str:
     return phone  # retorna original se não conseguir formatar
 
 
-def limpar_fila(session: requests.Session, cpf_clean: str):
+def limpar_fila(session: requests.Session, cpf_clean: str, api_url: str = None):
+    url = api_url or BASE_URL
     try:
-        r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
+        r = session.delete(f"{url}/api/multi-bank/queue", timeout=10)
         data = r.json()
         logger.info(f"[{cpf_clean}] Fila limpa: {data.get('message', '')}")
     except Exception as e:
@@ -283,12 +284,13 @@ def definir_resultado_fgts(results: list) -> str:
 
 # ─────────────────────────── CORE ─────────────────────────────
 
-def _polling(session, job_id, banks, cpf_clean, max_checks):
+def _polling(session, job_id, banks, cpf_clean, max_checks, api_url=None):
     last_results = []
     for attempt in range(1, max_checks + 1):
         time.sleep(POLLING_INTERVAL)
         try:
-            sr = session.get(f"{api_url}/api/multi-bank/status/{job_id}", timeout=30)
+            _url = api_url or BASE_URL
+            sr = session.get(f"{_url}/api/multi-bank/status/{job_id}", timeout=30)
             if sr.status_code in (401, 403):
                 return "erro_sessao", last_results, False
 
@@ -311,9 +313,10 @@ def _polling(session, job_id, banks, cpf_clean, max_checks):
     return "timeout", last_results, False
 
 
-def _consultar(session, payload):
+def _consultar(session, payload, api_url=None):
+    _url = api_url or BASE_URL
     resp = session.post(
-        f"{api_url}/api/multi-bank/consult-managed",
+        f"{_url}/api/multi-bank/consult-managed",
         json=payload,
         timeout=30
     )
@@ -368,12 +371,12 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
     if extra_payload:
         payload.update(extra_payload)
 
-    job_id, err = _consultar(session, payload)
+    job_id, err = _consultar(session, payload, api_url)
     if not job_id:
         return {"resultado": "erro", "anotacao": f"❌ Falha na consulta: {err}"}
     logger.info(f"[{cpf_clean}] JobId: {job_id}")
 
-    status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, POLLING_MAX)
+    status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, POLLING_MAX, api_url)
 
     if fila_cheia:
         logger.warning(f"[{cpf_clean}] Fila cheia detectada — retornando fila_cheia para retry")
@@ -442,7 +445,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.9.2"}
+    return {"status": "online", "service": "corbanx-api", "version": "4.9.3"}
 
 
 @app.post("/simular_corbanx_clt")
