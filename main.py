@@ -7,7 +7,7 @@ Porta: 8004 | v4.4.0
 import asyncio
 import logging
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 import time
@@ -16,7 +16,9 @@ import random
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="5.0.2")
+app = FastAPI(title="CorbanX API", version="5.0.3")
+
+API_TOKEN = "f4527e02f3a1cf14f9e9212d556a749f08926e456329e98db2e2d98723d435ac"
 
 BASE_URL = "https://neocashpromotora.log.br"
 
@@ -57,16 +59,18 @@ class ConsultaRequest(BaseModel):
     cpf: str
     email: str
     password: str
+    token: str
     banks: Optional[List[str]] = None
     base_url: Optional[str] = None
     name: Optional[str] = "Cliente"
-    phone: Optional[str] = "(11) 99999-9999"
+    phone: Optional[str] = None
 
 
 class ConsultaEnergiaRequest(BaseModel):
     cpf: str
     email: str
     password: str
+    token: str
     nome: str
     cep: str
     phone: Optional[str] = None
@@ -457,11 +461,14 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 class LimparFilaRequest(BaseModel):
     email: str
     password: str
+    token: str
     base_url: Optional[str] = None
 
 
 @app.post("/limpar_fila")
 async def endpoint_limpar_fila(req: LimparFilaRequest):
+    if req.token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
     """Limpa a fila do usuário na CorbanX"""
     def _limpar():
         session = requests.Session()
@@ -488,11 +495,13 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "5.0.2"}
+    return {"status": "online", "service": "corbanx-api", "version": "5.0.3"}
 
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
+    if req.token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_CLT
     extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, extra, req.base_url)
@@ -500,6 +509,8 @@ async def simular_clt(req: ConsultaRequest):
 
 @app.post("/simular_corbanx_fgts")
 async def simular_fgts(req: ConsultaRequest):
+    if req.token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_FGTS
     extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, extra, req.base_url)
@@ -507,5 +518,7 @@ async def simular_fgts(req: ConsultaRequest):
 
 @app.post("/simular_corbanx_energia")
 async def simular_energia(req: ConsultaEnergiaRequest):
+    if req.token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
     extra = {"name": req.nome, "cep": req.cep, "phone": formatar_phone(req.phone or "")}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", BANKS_ENERGIA, extra, req.base_url)
