@@ -11,11 +11,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional, List
 import time
+import random
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="5.0.1")
+app = FastAPI(title="CorbanX API", version="5.0.2")
 
 BASE_URL = "https://neocashpromotora.log.br"
 
@@ -136,6 +137,41 @@ def extrair_oferta_mercantil(r: dict) -> tuple:
         valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return margem, parcela, prazo, valor_liberado
     return margem, None, None, None
+
+
+def gerar_phone_aleatorio() -> str:
+    """Gera um número de celular aleatório válido (DDD + 9 dígitos)"""
+    ddd = random.choice([
+        11, 12, 13, 14, 15, 16, 17, 18, 19,  # SP
+        21, 22, 24,  # RJ
+        27, 28,  # ES
+        31, 32, 33, 34, 35, 37, 38,  # MG
+        41, 42, 43, 44, 45, 46,  # PR
+        47, 48, 49,  # SC
+        51, 53, 54, 55,  # RS
+        61,  # DF
+        62, 64,  # GO
+        63,  # TO
+        65, 66,  # MT
+        67,  # MS
+        68,  # AC
+        69,  # RO
+        71, 73, 74, 75, 77,  # BA
+        79,  # SE
+        81, 87,  # PE
+        82,  # AL
+        83,  # PB
+        84,  # RN
+        85, 88,  # CE
+        86, 89,  # PI
+        91, 93, 94,  # PA
+        92, 97,  # AM
+        95,  # RR
+        96,  # AP
+        98, 99,  # MA
+    ])
+    numero = random.randint(90000000, 99999999)
+    return f"({ddd:02d}) 9{numero}"
 
 
 def formatar_phone(phone: str) -> str:
@@ -452,20 +488,20 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "5.0.1"}
+    return {"status": "online", "service": "corbanx-api", "version": "5.0.2"}
 
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
     banks = req.banks or BANKS_CLT
-    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone or "(11) 99999-9999")}
+    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, extra, req.base_url)
 
 
 @app.post("/simular_corbanx_fgts")
 async def simular_fgts(req: ConsultaRequest):
     banks = req.banks or BANKS_FGTS
-    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone or "(11) 99999-9999")}
+    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
     return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, extra, req.base_url)
 
 
