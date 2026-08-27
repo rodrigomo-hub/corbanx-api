@@ -994,7 +994,7 @@ async function loadLogs(){
     if(l.includes('ERROR')||l.includes('error')||l.includes('Falha')) cls='log-err';
     else if(l.includes('WARNING')||l.includes('WARNING')||l.includes('Fila cheia')) cls='log-warn';
     else if(l.includes('Login OK')||l.includes('completed')) cls='log-ok';
-    return `<div class="log-line ${cls}">${l.replace(/</g,'&lt;')}</div>`;
+    const safe = l.replace(/</g,'&lt;'); return `<div class="log-line ${cls}">${safe}</div>`;
   }).join('');
   container.scrollTop = container.scrollHeight;
 }
@@ -1060,4 +1060,3 @@ window.onload = async()=>{
 </body>
 </html>"""
     return HTMLResponse(html)
----
