@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CorbanX API - v6.0.0
+CorbanX API - v6.1.0
 Multi-credencial, round-robin, dashboard, log por empresa
 """
 
@@ -1060,3 +1060,4 @@ window.onload = async()=>{
 </body>
 </html>"""
     return HTMLResponse(html)
+---
