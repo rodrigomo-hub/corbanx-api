@@ -15,9 +15,9 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="4.9.5")
+app = FastAPI(title="CorbanX API", version="5.0.0")
 
-BASE_URL = "https://corbanx-api-prod.up.railway.app"
+BASE_URL = "https://neocashpromotora.log.br"
 
 BANKS_CLT = [
     "V8_DIGITAL",
@@ -315,13 +315,9 @@ def _polling(session, job_id, banks, cpf_clean, max_checks, api_url=None):
 
 def _consultar(session, payload, api_url=None):
     _url = api_url or BASE_URL
-    # neocash e outros whitelabels usam /consult; corbanx-api-prod usa /consult-managed
-    endpoint = "consult" if _url != BASE_URL else "consult-managed"
-    # remove maxWaitMs se usar /consult (não suportado)
-    if endpoint == "consult":
-        payload = {k: v for k, v in payload.items() if k != "maxWaitMs"}
+    payload = {k: v for k, v in payload.items() if k != "maxWaitMs"}
     resp = session.post(
-        f"{_url}/api/multi-bank/{endpoint}",
+        f"{_url}/api/multi-bank/consult",
         json=payload,
         timeout=30
     )
@@ -452,7 +448,7 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "4.9.5"}
+    return {"status": "online", "service": "corbanx-api", "version": "5.0.0"}
 
 
 @app.post("/simular_corbanx_clt")
