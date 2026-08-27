@@ -1,91 +1,202 @@
 #!/usr/bin/env python3
 """
-CorbanX API - Wrapper multi-banco CLT + FGTS + Energia
-Porta: 8004 | v4.4.0
+CorbanX API - v6.0.0
+Multi-credencial, round-robin, dashboard, log por empresa
 """
 
 import asyncio
 import logging
+import random
+import sqlite3
+import time
+import threading
+from contextlib import contextmanager
+from datetime import datetime, date
+from pathlib import Path
+
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List
-import time
-import random
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="5.0.4")
+app = FastAPI(title="CorbanX API", version="6.0.0")
 
-API_TOKEN = "f4527e02f3a1cf14f9e9212d556a749f08926e456329e98db2e2d98723d435ac"
+# ─────────────────────────── CONFIG ───────────────────────────
 
-BASE_URL = "https://neocashpromotora.log.br"
+BASE_URL    = "https://neocashpromotora.log.br"
+API_TOKEN   = "f4527e02f3a1cf14f9e9212d556a749f08926e456329e98db2e2d98723d435ac"
+ADMIN_TOKEN = "corbanx-admin-2026"
+DB_PATH     = "/opt/corbanx-api/corbanx.db"
 
 BANKS_CLT = [
-    "V8_DIGITAL",
-    "BANCO_PRATA_CELCOIN",
-    "NOVO_SAQUE_CLT",
-    "PRESENCA",
-    "CREFAZ",
-    "VCTEX",
-    "TITAN",
-    "MERCANTIL"
+    "V8_DIGITAL", "BANCO_PRATA_CELCOIN", "NOVO_SAQUE_CLT",
+    "PRESENCA", "CREFAZ", "VCTEX", "TITAN", "MERCANTIL"
 ]
 
 BANKS_FGTS = [
-    "BANCO_PRATA_BMP",
-    "BANCO_PRATA_QITECH_FGTS",
-    "V8_DIGITAL_FGTS",
-    "NOVO_SAQUE_FGTS",
-    "DSV",
-    "LOTUS"
+    "BANCO_PRATA_BMP", "BANCO_PRATA_QITECH_FGTS",
+    "V8_DIGITAL_FGTS", "NOVO_SAQUE_FGTS", "DSV", "LOTUS"
 ]
 
 BANKS_ENERGIA = ["CREFAZ_LUZ"]
 
-POLLING_INTERVAL = 5
-POLLING_MAX = 36        # 36 x 5s = 180s (3 minutos)
-FILA_CHEIA_CHECKS = 24  # 24 x 5s = 120s (2 minutos)
+POLLING_INTERVAL  = 5
+POLLING_MAX       = 36   # 3 minutos
+FILA_CHEIA_CHECKS = 24   # 2 minutos
 
-STATUS_NEGADOS = ("NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO", "SEM_AUTORIZACAO")
-STATUS_SEM_AUTORIZACAO = ("NAO_AUTORIZADO", "SEM_AUTORIZACAO")
+# ─────────────────────────── DATABASE ─────────────────────────
 
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+def init_db():
+    with get_db() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS credenciais (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                ativo INTEGER DEFAULT 1,
+                ultimo_uso REAL DEFAULT 0,
+                total_consultas INTEGER DEFAULT 0,
+                falhas_consecutivas INTEGER DEFAULT 0,
+                criado_em TEXT DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS consultas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa TEXT NOT NULL,
+                cpf TEXT NOT NULL,
+                tipo TEXT NOT NULL,
+                resultado TEXT,
+                credencial_email TEXT,
+                tempo_segundos REAL,
+                bancos_consultados INTEGER DEFAULT 0,
+                criado_em TEXT DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
+        db.commit()
+    logger.info("Banco de dados inicializado")
+
+init_db()
+
+# ─────────────────────────── ROUND-ROBIN ──────────────────────
+
+_rr_lock = threading.Lock()
+_rr_index = 0
+
+def get_next_credencial():
+    global _rr_index
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT id, email, password FROM credenciais WHERE ativo=1 ORDER BY ultimo_uso ASC"
+        ).fetchall()
+    if not rows:
+        raise HTTPException(status_code=503, detail="Nenhuma credencial ativa disponível")
+    with _rr_lock:
+        idx = _rr_index % len(rows)
+        _rr_index += 1
+    return rows[idx]  # (id, email, password)
+
+def registrar_uso(cred_id: int, sucesso: bool):
+    with get_db() as db:
+        if sucesso:
+            db.execute("""
+                UPDATE credenciais
+                SET ultimo_uso=?, total_consultas=total_consultas+1, falhas_consecutivas=0
+                WHERE id=?
+            """, (time.time(), cred_id))
+        else:
+            db.execute("""
+                UPDATE credenciais
+                SET falhas_consecutivas=falhas_consecutivas+1
+                WHERE id=?
+            """, (cred_id,))
+            # Desativa se falhou 3x seguidas
+            db.execute("""
+                UPDATE credenciais SET ativo=0
+                WHERE id=? AND falhas_consecutivas >= 3
+            """, (cred_id,))
+        db.commit()
+
+def log_consulta(empresa, cpf, tipo, resultado, credencial_email, tempo, bancos):
+    with get_db() as db:
+        db.execute("""
+            INSERT INTO consultas (empresa, cpf, tipo, resultado, credencial_email, tempo_segundos, bancos_consultados)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (empresa, cpf, tipo, resultado, credencial_email, tempo, bancos))
+        db.commit()
 
 # ─────────────────────────── MODELS ───────────────────────────
 
 class ConsultaRequest(BaseModel):
     cpf: str
-    email: str
-    password: str
     token: str
+    empresa: str = "desconhecida"
     banks: Optional[List[str]] = None
     base_url: Optional[str] = None
-    name: Optional[str] = "CLIENTE CORBAN"
+    name: Optional[str] = None
     phone: Optional[str] = None
-
 
 class ConsultaEnergiaRequest(BaseModel):
     cpf: str
-    email: str
-    password: str
     token: str
+    empresa: str = "desconhecida"
     nome: str
     cep: str
     phone: Optional[str] = None
     base_url: Optional[str] = None
 
+class LimparFilaRequest(BaseModel):
+    email: str
+    password: str
+    token: str
+    base_url: Optional[str] = None
+
+class CredencialCreate(BaseModel):
+    email: str
+    password: str
+    admin_token: str
+
+class CredencialUpdate(BaseModel):
+    admin_token: str
+    ativo: Optional[int] = None
+    password: Optional[str] = None
 
 # ─────────────────────────── HELPERS ──────────────────────────
 
 def limpar_cpf(cpf: str) -> str:
     return cpf.replace(".", "").replace("-", "").strip()
 
-
 def formatar_cpf(cpf: str) -> str:
     c = limpar_cpf(cpf)
     return f"{c[:3]}.{c[3:6]}.{c[6:9]}-{c[9:]}"
 
+def formatar_phone(phone: str) -> str:
+    if not phone:
+        return ""
+    digits = ''.join(filter(str.isdigit, phone))
+    if digits.startswith("55") and len(digits) > 11:
+        digits = digits[2:]
+    if len(digits) == 11:
+        return f"({digits[:2]}) {digits[2:7]}-{digits[7:]}"
+    elif len(digits) == 10:
+        return f"({digits[:2]}) {digits[2:6]}-{digits[6:]}"
+    return phone
+
+def gerar_phone_aleatorio() -> str:
+    ddds = [11,12,13,14,15,16,17,18,19,21,22,24,27,28,31,32,33,34,35,37,38,
+            41,42,43,44,45,46,47,48,49,51,53,54,55,61,62,63,64,65,66,67,68,
+            69,71,73,74,75,77,79,81,82,83,84,85,86,87,88,89,91,92,93,94,95,96,98,99]
+    ddd = random.choice(ddds)
+    numero = random.randint(90000000, 99999999)
+    return f"({ddd:02d}) 9{numero}"
 
 def fix_status(status: str) -> str:
     if not status:
@@ -93,7 +204,7 @@ def fix_status(status: str) -> str:
     s = status.upper()
     if s in ("COM_SALDO", "NAO_APROVADO", "NAO_AUTORIZADO", "SEM_SALDO", "SEM_AUTORIZACAO", "FALHA_CONSULTA"):
         return s
-    if "COM_SALDO" in s or "SALDO" in s and "SEM" not in s:
+    if "COM_SALDO" in s:
         return "COM_SALDO"
     if "SEM_SALDO" in s:
         return "SEM_SALDO"
@@ -103,132 +214,54 @@ def fix_status(status: str) -> str:
         return "NAO_AUTORIZADO"
     return "FALHA_CONSULTA"
 
-
 def extrair_margem_presenca(r: dict) -> tuple:
     margem = r.get("margem", "N/A")
     tabelas = r.get("presenca_tabelas", [])
     if tabelas:
         melhor = sorted(tabelas, key=lambda t: t.get("valorLiberado", 0), reverse=True)[0]
-        parcela = f"R$ {melhor['valorParcela']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        parcela = f"R$ {melhor['valorParcela']:,.2f}".replace(",","X").replace(".",",").replace("X",".")
         prazo = str(melhor.get("prazo", ""))
         liberado = melhor.get("valorLiberado", 0)
-        valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        valor_liberado = f"R$ {liberado:,.2f}".replace(",","X").replace(".",",").replace("X",".")
         return margem, parcela, prazo, valor_liberado
     return margem, None, None, None
 
-
-def extrair_oferta_mercantil(r: dict) -> tuple:
-    """Mercantil não usa os campos genéricos (valor_parcela/prazo/
-    valor_liberado no nível raiz) — vem estruturado em
-    mercantil_simulacao.tabelaFlexivel[].prestacao[], cada tabela pode
-    ter mais de uma opção de prestação. Achado em produção (14/08) —
-    Rodrigo reportou que o texto da oferta pro Mercantil só mostrava
-    margem, sem parcela/prazo/valor liberado. Mesmo padrão de tratamento
-    especial já usado pro PRESENCA (extrair_margem_presenca) — cada
-    banco pode estruturar a resposta diferente."""
-    margem = r.get("margem", "N/A")
-    simulacao = r.get("mercantil_simulacao") or {}
-    tabelas = simulacao.get("tabelaFlexivel") or []
-    todas_prestacoes = []
-    for tabela in tabelas:
-        todas_prestacoes.extend(tabela.get("prestacao") or [])
-    if todas_prestacoes:
-        melhor = sorted(todas_prestacoes, key=lambda p: p.get("valorLiberado", 0) or 0, reverse=True)[0]
-        parcela = f"R$ {melhor['valorParcela']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        prazo = str(melhor.get("quantidadeParcelas", ""))
-        liberado = melhor.get("valorLiberado", 0)
-        valor_liberado = f"R$ {liberado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return margem, parcela, prazo, valor_liberado
-    return margem, None, None, None
-
-
-def gerar_phone_aleatorio() -> str:
-    """Gera um número de celular aleatório válido (DDD + 9 dígitos)"""
-    ddd = random.choice([
-        11, 12, 13, 14, 15, 16, 17, 18, 19,  # SP
-        21, 22, 24,  # RJ
-        27, 28,  # ES
-        31, 32, 33, 34, 35, 37, 38,  # MG
-        41, 42, 43, 44, 45, 46,  # PR
-        47, 48, 49,  # SC
-        51, 53, 54, 55,  # RS
-        61,  # DF
-        62, 64,  # GO
-        63,  # TO
-        65, 66,  # MT
-        67,  # MS
-        68,  # AC
-        69,  # RO
-        71, 73, 74, 75, 77,  # BA
-        79,  # SE
-        81, 87,  # PE
-        82,  # AL
-        83,  # PB
-        84,  # RN
-        85, 88,  # CE
-        86, 89,  # PI
-        91, 93, 94,  # PA
-        92, 97,  # AM
-        95,  # RR
-        96,  # AP
-        98, 99,  # MA
-    ])
-    numero = random.randint(90000000, 99999999)
-    return f"({ddd:02d}) 9{numero}"
-
-
-def formatar_phone(phone: str) -> str:
-    """Normaliza telefone para (DD) 9XXXX-XXXX ou (DD) XXXX-XXXX"""
-    if not phone:
-        return ""
-    digits = ''.join(filter(str.isdigit, phone))
-    # Remove 55 do início se vier com DDI
-    if digits.startswith("55") and len(digits) > 11:
-        digits = digits[2:]
-    if len(digits) == 11:
-        return f"({digits[:2]}) {digits[2:7]}-{digits[7:]}"
-    elif len(digits) == 10:
-        return f"({digits[:2]}) {digits[2:6]}-{digits[6:]}"
-    return phone  # retorna original se não conseguir formatar
-
-
-def limpar_fila(session: requests.Session, cpf_clean: str, api_url: str = None):
-    url = api_url or BASE_URL
-    try:
-        r = session.delete(f"{url}/api/multi-bank/queue", timeout=10)
-        data = r.json()
-        logger.info(f"[{cpf_clean}] Fila limpa: {data.get('message', '')}")
-    except Exception as e:
-        logger.warning(f"[{cpf_clean}] Erro ao limpar fila: {e}")
-
+def definir_resultado_fgts(results: list) -> str:
+    STATUS_SEM_AUTH = ("NAO_AUTORIZADO", "SEM_AUTORIZACAO")
+    statuses = [fix_status(r.get("status", "")) for r in results]
+    if "COM_SALDO" in statuses:
+        return "pre_aprovado"
+    if "SEM_SALDO" in statuses:
+        return "sem_saldo"
+    auth = [s for s in statuses if s in STATUS_SEM_AUTH]
+    if auth and all(s in STATUS_SEM_AUTH or s in ("FALHA_CONSULTA", "NAO_APROVADO") for s in statuses):
+        return "aguardando_autorizacao"
+    return "sem_saldo"
 
 def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks: int = 0, all_banks: list = None) -> tuple:
-    responderam = {r.get("bank_name") for r in results}
-    aprovados   = [r for r in results if fix_status(r.get("status", "")) == "COM_SALDO"]
-    reprovados  = [r for r in results if fix_status(r.get("status", "")) in STATUS_NEGADOS]
-    falhas      = [r for r in results if fix_status(r.get("status", "")) not in ("COM_SALDO",) + STATUS_NEGADOS]
+    responderam  = {r.get("bank_name") for r in results}
+    aprovados    = [r for r in results if fix_status(r.get("status","")) == "COM_SALDO"]
+    reprovados   = [r for r in results if fix_status(r.get("status","")) in ("NAO_APROVADO","NAO_AUTORIZADO","SEM_SALDO","SEM_AUTORIZACAO")]
+    falhas       = [r for r in results if fix_status(r.get("status","")) not in ("COM_SALDO","NAO_APROVADO","NAO_AUTORIZADO","SEM_SALDO","SEM_AUTORIZACAO")]
 
     def get_margem(r):
         try:
-            val = r.get("margem", "0") or "0"
-            return float(str(val).replace("R$", "").replace(".", "").replace(",", ".").strip())
-        except Exception:
+            val = r.get("margem","0") or "0"
+            return float(str(val).replace("R$","").replace(".","").replace(",",".").strip())
+        except:
             return 0.0
 
     aprovados.sort(key=get_margem, reverse=True)
-
     linhas = []
 
     if parcial:
-        responderam_n = len(results)
-        total_n = total_banks if total_banks > 0 else responderam_n
-        linhas.append(f"⏱️ Consultado por 3 minutos — {responderam_n}/{total_n} bancos responderam")
+        linhas.append(f"⏱️ Consultado por 3 minutos — {len(results)}/{total_banks} bancos responderam")
         linhas.append("")
 
     if aprovados:
         melhor = aprovados[0]
-        banco  = melhor.get("bank_name", "DESCONHECIDO")
-        margem = melhor.get("margem", "N/A")
+        banco  = melhor.get("bank_name","DESCONHECIDO")
+        margem = melhor.get("margem","N/A")
         linhas.append("🔥 OPORTUNIDADE ENCONTRADA")
         linhas.append(f"🏦 Banco Principal: {banco}")
         linhas.append(f"💰 Margem: {margem}")
@@ -240,262 +273,208 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
     linhas.append(f"\n📊 Detalhamento CorbanX {tipo.upper()}\n")
 
     for r in aprovados:
-        banco = r.get("bank_name", "?")
+        banco = r.get("bank_name","?")
         nome  = r.get("name")
         linhas.append(f"✅ {banco}")
         if nome:
             linhas.append(f"Cliente: {nome}")
-
         if tipo == "FGTS":
-            saldo = r.get("margem", "N/A")
-            linhas.append(f"Saldo: {saldo}")
+            linhas.append(f"Saldo: {r.get('margem','N/A')}")
         elif banco == "PRESENCA":
-            margem, parcela, prazo, valor_liberado = extrair_margem_presenca(r)
-            linhas.append(f"Margem: {margem}")
-            if parcela:
-                linhas.append(f"Parcela: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
-            if valor_liberado:
-                linhas.append(f"Valor Liberado: {valor_liberado}")
-        elif banco == "MERCANTIL":
-            margem, parcela, prazo, valor_liberado = extrair_oferta_mercantil(r)
-            linhas.append(f"Margem: {margem}")
-            if parcela:
-                linhas.append(f"Parcela: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
-            if valor_liberado:
-                linhas.append(f"Valor Liberado: {valor_liberado}")
+            m, p, pr, vl = extrair_margem_presenca(r)
+            linhas.append(f"Margem: {m}")
+            if p:
+                linhas.append(f"Parcela: {p}" + (f" | Prazo: {pr}x" if pr else ""))
+            if vl:
+                linhas.append(f"Valor Liberado: {vl}")
         else:
-            margem  = r.get("margem", "N/A")
+            margem = r.get("margem","N/A")
             parcela = r.get("valor_parcela") or r.get("saldo_24m")
             prazo   = r.get("prazo")
-            valor_liberado = r.get("valor_liberado")
+            vl      = r.get("valor_liberado")
             linhas.append(f"Margem: {margem}")
             if parcela:
                 label = "Saldo 24m" if not r.get("valor_parcela") else "Parcela"
                 linhas.append(f"{label}: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
-            if valor_liberado:
-                linhas.append(f"Valor Liberado: {valor_liberado}")
-
+            if vl:
+                linhas.append(f"Valor Liberado: {vl}")
         linhas.append("")
 
     for r in reprovados:
-        banco  = r.get("bank_name", "?")
-        motivo = r.get("resultado") or "Sem informação"
-        linhas.append(f"❌ {banco}")
-        linhas.append(f"Motivo: {motivo}")
+        linhas.append(f"❌ {r.get('bank_name','?')}")
+        linhas.append(f"Motivo: {r.get('resultado') or 'Sem informação'}")
         linhas.append("")
 
     for r in falhas:
-        banco  = r.get("bank_name", "?")
-        motivo = r.get("resultado") or "Erro desconhecido"
-        linhas.append(f"⚠️ {banco} (FALHA_CONSULTA)")
-        linhas.append(f"Motivo: {motivo}")
+        linhas.append(f"⚠️ {r.get('bank_name','?')} (FALHA_CONSULTA)")
+        linhas.append(f"Motivo: {r.get('resultado') or 'Erro desconhecido'}")
         linhas.append("")
 
     if parcial and total_banks > 0 and all_banks:
         pendentes = [b for b in all_banks if b not in responderam]
-        if pendentes:
-            for b in pendentes:
-                linhas.append(f"⏳ {b} — não respondeu em 3 minutos (ignorado)")
+        for b in pendentes:
+            linhas.append(f"⏳ {b} — não respondeu em 3 minutos (ignorado)")
 
     return resultado, "\n".join(linhas).strip()
 
-
-def definir_resultado_fgts(results: list) -> str:
-    """
-    Inteligência FGTS:
-    - COM_SALDO em qualquer banco → pre_aprovado
-    - SEM_SALDO em qualquer banco → sem_saldo (prioridade sobre autorização)
-    - Todos NAO_AUTORIZADO/SEM_AUTORIZACAO → aguardando_autorizacao
-    """
-    statuses = [fix_status(r.get("status", "")) for r in results]
-
-    if "COM_SALDO" in statuses:
-        return "pre_aprovado"
-
-    if "SEM_SALDO" in statuses:
-        return "sem_saldo"
-
-    if all(s in STATUS_SEM_AUTORIZACAO for s in statuses if s not in ("FALHA_CONSULTA", "NAO_APROVADO")):
-        autorizacao = [s for s in statuses if s in STATUS_SEM_AUTORIZACAO]
-        if autorizacao:
-            return "aguardando_autorizacao"
-
-    return "sem_saldo"
-
-
 # ─────────────────────────── CORE ─────────────────────────────
 
-def _polling(session, job_id, banks, cpf_clean, max_checks, api_url=None):
-    last_results = []
-    for attempt in range(1, max_checks + 1):
-        time.sleep(POLLING_INTERVAL)
-        try:
-            _url = api_url or BASE_URL
-            sr = session.get(f"{_url}/api/multi-bank/status/{job_id}", timeout=30)
-            if sr.status_code in (401, 403):
-                return "erro_sessao", last_results, False
-
-            data = sr.json()
-            status = data.get("status", "processing")
-            last_results = data.get("results") or last_results
-
-            logger.info(f"[{cpf_clean}] Polling {attempt}/{max_checks}: {status} | {len(last_results)}/{len(banks)} bancos")
-
-            if status == "completed":
-                return "completed", last_results, False
-
-            if attempt == FILA_CHEIA_CHECKS and len(last_results) == 0:
-                logger.warning(f"[{cpf_clean}] Fila cheia detectada")
-                return "fila_cheia", last_results, True
-
-        except Exception as e:
-            logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
-
-    return "timeout", last_results, False
-
-
-def _consultar(session, payload, api_url=None):
-    _url = api_url or BASE_URL
-    payload = {k: v for k, v in payload.items() if k != "maxWaitMs"}
-    resp = session.post(
-        f"{_url}/api/multi-bank/consult",
-        json=payload,
-        timeout=30
-    )
-    if resp.status_code not in (200, 202):
-        return None, f"HTTP {resp.status_code}"
-    return resp.json().get("jobId"), None
-
-
-def _login(session, email, password, cpf_clean, api_url=None):
-    url = api_url or BASE_URL
-    try:
-        r = session.post(
-            f"{url}/api/auth/login",
-            json={"email": email, "password": password},
-            timeout=15
-        )
-        if r.status_code not in (200, 201):
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"[{cpf_clean}] Erro login: {e}")
-        return False
-
-
-def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, extra_payload: dict = None, base_url: str = None) -> dict:
-    cpf_clean = limpar_cpf(cpf)
-    cpf_fmt   = formatar_cpf(cpf)
-    session   = requests.Session()
-    api_url   = base_url.rstrip("/") if base_url else BASE_URL
-    session.headers.update({
+def _make_session(api_url: str) -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
         "accept": "application/json, text/plain, */*",
         "content-type": "application/json",
         "origin": api_url,
         "referer": f"{api_url}/login",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
     })
+    return s
 
-    logger.info(f"[{cpf_clean}] Login ({email})")
-    if not _login(session, email, password, cpf_clean, api_url):
-        return {"resultado": "erro", "anotacao": "❌ Falha no login"}
-    logger.info(f"[{cpf_clean}] Login OK")
+def _login(session, email, password, api_url, cpf_clean):
+    try:
+        r = session.post(f"{api_url}/api/auth/login",
+            json={"email": email, "password": password}, timeout=15)
+        if r.status_code not in (200, 201):
+            logger.warning(f"[{cpf_clean}] Login falhou ({email}): HTTP {r.status_code}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"[{cpf_clean}] Erro login: {e}")
+        return False
 
-    payload = {
-        "cpf": cpf_fmt,
-        "name": extra_payload.get("name", "Cliente") if extra_payload else "Cliente",
-        "birthDate": "", "motherName": "",
-        "productType": tipo,
-        "selectedBanks": banks,
-        "userIP": "189.126.131.81",
-        "phone": extra_payload.get("phone", "(11) 99999-9999") if extra_payload else "(11) 99999-9999",
-        "cep": "", "clearCache": False,
-        "maxWaitMs": 180000,
-        "titanOperationalSystem": "Windows",
-        "titanDeviceModel": "Desktop Windows"
-    }
-    if extra_payload:
-        payload.update(extra_payload)
+def _limpar_fila(session, api_url, cpf_clean):
+    try:
+        r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
+        data = r.json()
+        logger.info(f"[{cpf_clean}] Fila limpa: {data.get('message','')}")
+    except Exception as e:
+        logger.warning(f"[{cpf_clean}] Erro ao limpar fila: {e}")
 
-    job_id, err = _consultar(session, payload, api_url)
-    if not job_id:
-        return {"resultado": "erro", "anotacao": f"❌ Falha na consulta: {err}"}
-    logger.info(f"[{cpf_clean}] JobId: {job_id}")
+def _consultar(session, payload, api_url):
+    payload = {k: v for k, v in payload.items() if k != "maxWaitMs"}
+    try:
+        r = session.post(f"{api_url}/api/multi-bank/consult", json=payload, timeout=30)
+        if r.status_code not in (200, 202):
+            return None, f"HTTP {r.status_code}"
+        return r.json().get("jobId"), None
+    except Exception as e:
+        return None, str(e)
 
-    status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, POLLING_MAX, api_url)
+def _polling(session, job_id, banks, cpf_clean, api_url, max_checks):
+    last_results = []
+    for attempt in range(1, max_checks + 1):
+        time.sleep(POLLING_INTERVAL)
+        try:
+            sr = session.get(f"{api_url}/api/multi-bank/status/{job_id}", timeout=30)
+            if sr.status_code in (401, 403):
+                return "erro_sessao", last_results, False
+            data = sr.json()
+            status = data.get("status", "processing")
+            last_results = data.get("results") or last_results
+            logger.info(f"[{cpf_clean}] Polling {attempt}/{max_checks}: {status} | {len(last_results)}/{len(banks)} bancos")
+            if status == "completed":
+                return "completed", last_results, False
+            if attempt == FILA_CHEIA_CHECKS and len(last_results) == 0:
+                logger.warning(f"[{cpf_clean}] Fila cheia detectada — retornando fila_cheia")
+                return "fila_cheia", last_results, True
+        except Exception as e:
+            logger.warning(f"[{cpf_clean}] Erro polling {attempt}: {e}")
+    return "timeout", last_results, False
 
-    if fila_cheia:
-        logger.warning(f"[{cpf_clean}] Fila cheia detectada — retornando fila_cheia para retry")
-        return {
-            "resultado": "fila_cheia",
-            "anotacao": "⏳ Fila de consultas cheia, tente novamente em alguns segundos",
-            "job_id": job_id,
-            "bancos_consultados": 0
+def _executar_sync(cpf: str, tipo: str, banks: list, extra_payload: dict, empresa: str, base_url: str = None) -> dict:
+    cpf_clean  = limpar_cpf(cpf)
+    cpf_fmt    = formatar_cpf(cpf)
+    api_url    = base_url.rstrip("/") if base_url else BASE_URL
+    inicio     = time.time()
+
+    # Pega próxima credencial (round-robin)
+    max_tentativas = 3
+    cred = None
+    for _ in range(max_tentativas):
+        try:
+            cred = get_next_credencial()
+        except HTTPException:
+            return {"resultado": "erro", "anotacao": "❌ Nenhuma credencial ativa disponível"}
+
+        cred_id, email, password = cred
+        session = _make_session(api_url)
+
+        logger.info(f"[{cpf_clean}] Login com {email}")
+        if not _login(session, email, password, api_url, cpf_clean):
+            registrar_uso(cred_id, False)
+            continue
+
+        logger.info(f"[{cpf_clean}] Login OK")
+
+        payload = {
+            "cpf": cpf_fmt,
+            "name": extra_payload.get("name", "CLIENTE CORBAN"),
+            "birthDate": "", "motherName": "",
+            "productType": tipo,
+            "selectedBanks": banks,
+            "userIP": "189.126.131.81",
+            "phone": extra_payload.get("phone", gerar_phone_aleatorio()),
+            "cep": extra_payload.get("cep", ""),
+            "clearCache": False,
+            "titanOperationalSystem": "Windows",
+            "titanDeviceModel": "Desktop Windows"
         }
 
-    if status == "erro_sessao":
-        return {"resultado": "erro", "anotacao": "❌ Sessão expirada durante consulta"}
+        job_id, err = _consultar(session, payload, api_url)
+        if not job_id:
+            registrar_uso(cred_id, False)
+            continue
 
-    parcial = status != "completed"
-    resultado, anotacao = montar_anotacao(
-        last_results, tipo,
-        parcial=parcial,
-        total_banks=len(banks),
-        all_banks=banks
-    )
+        logger.info(f"[{cpf_clean}] JobId: {job_id} | Credencial: {email}")
 
-    # Sobrescreve resultado com inteligência FGTS
-    if tipo == "FGTS" and last_results:
-        resultado = definir_resultado_fgts(last_results)
+        status, last_results, fila_cheia = _polling(session, job_id, banks, cpf_clean, api_url, POLLING_MAX)
+
+        if fila_cheia:
+            # Tenta limpar e usar próxima credencial
+            _limpar_fila(session, api_url, cpf_clean)
+            registrar_uso(cred_id, False)
+            continue
+
+        registrar_uso(cred_id, True)
+        tempo = time.time() - inicio
+
+        if status == "erro_sessao":
+            continue
+
+        parcial = status != "completed"
+        resultado, anotacao = montar_anotacao(last_results, tipo, parcial=parcial, total_banks=len(banks), all_banks=banks)
+
+        if tipo == "FGTS" and last_results:
+            resultado = definir_resultado_fgts(last_results)
+
+        log_consulta(empresa, cpf_clean, tipo, resultado, email, round(tempo, 1), len(last_results))
+
+        return {
+            "resultado": resultado,
+            "anotacao": anotacao,
+            "job_id": job_id,
+            "bancos_consultados": len(last_results),
+            "tempo_segundos": round(tempo, 1),
+            "credencial": email
+        }
+
+    tempo = time.time() - inicio
+    log_consulta(empresa, cpf_clean, tipo, "fila_cheia", None, round(tempo, 1), 0)
     return {
-        "resultado": resultado,
-        "anotacao": anotacao,
-        "job_id": job_id,
-        "bancos_consultados": len(last_results)
+        "resultado": "fila_cheia",
+        "anotacao": "⏳ Fila de consultas cheia em todas as credenciais. Tente novamente em alguns minutos.",
+        "bancos_consultados": 0
     }
 
-
-# ─────────────────────────── ENDPOINTS ────────────────────────
-
-class LimparFilaRequest(BaseModel):
-    email: str
-    password: str
-    token: str
-    base_url: Optional[str] = None
-
-
-@app.post("/limpar_fila")
-async def endpoint_limpar_fila(req: LimparFilaRequest):
-    if req.token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Token inválido")
-    """Limpa a fila do usuário na CorbanX"""
-    def _limpar():
-        session = requests.Session()
-        try:
-            login_resp = session.post(
-                f"{api_url}/api/auth/login",
-                json={"email": req.email, "password": req.password},
-                timeout=15
-            )
-            if login_resp.status_code not in (200, 201):
-                return {"status": "erro", "message": f"Falha no login (HTTP {login_resp.status_code})"}
-        except Exception as e:
-            return {"status": "erro", "message": f"Erro de conexão: {e}"}
-
-        try:
-            r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
-            data = r.json()
-            return {"status": "ok", "removed": data.get("removed", 0), "message": data.get("message", "")}
-        except Exception as e:
-            return {"status": "erro", "message": f"Erro ao limpar fila: {e}"}
-
-    return await asyncio.to_thread(_limpar)
-
+# ─────────────────────────── ENDPOINTS API ────────────────────
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "5.0.4"}
-
+    with get_db() as db:
+        total_creds = db.execute("SELECT COUNT(*) FROM credenciais WHERE ativo=1").fetchone()[0]
+        total_hoje  = db.execute("SELECT COUNT(*) FROM consultas WHERE date(criado_em)=date('now','localtime')").fetchone()[0]
+    return {"status": "online", "service": "corbanx-api", "version": "6.0.0",
+            "credenciais_ativas": total_creds, "consultas_hoje": total_hoje}
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
@@ -503,8 +482,7 @@ async def simular_clt(req: ConsultaRequest):
         raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_CLT
     extra = {"name": req.name or "CLIENTE CORBAN", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, extra, req.base_url)
-
+    return await asyncio.to_thread(_executar_sync, req.cpf, "CLT", banks, extra, req.empresa, req.base_url)
 
 @app.post("/simular_corbanx_fgts")
 async def simular_fgts(req: ConsultaRequest):
@@ -512,12 +490,341 @@ async def simular_fgts(req: ConsultaRequest):
         raise HTTPException(status_code=401, detail="Token inválido")
     banks = req.banks or BANKS_FGTS
     extra = {"name": req.name or "CLIENTE CORBAN", "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, extra, req.base_url)
-
+    return await asyncio.to_thread(_executar_sync, req.cpf, "FGTS", banks, extra, req.empresa, req.base_url)
 
 @app.post("/simular_corbanx_energia")
 async def simular_energia(req: ConsultaEnergiaRequest):
     if req.token != API_TOKEN:
         raise HTTPException(status_code=401, detail="Token inválido")
-    extra = {"name": req.nome, "cep": req.cep, "phone": formatar_phone(req.phone or "")}
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", BANKS_ENERGIA, extra, req.base_url)
+    extra = {"name": req.nome, "cep": req.cep, "phone": formatar_phone(req.phone) if req.phone else gerar_phone_aleatorio()}
+    return await asyncio.to_thread(_executar_sync, req.cpf, "CLT", BANKS_ENERGIA, extra, req.empresa, req.base_url)
+
+@app.post("/limpar_fila")
+async def endpoint_limpar_fila(req: LimparFilaRequest):
+    if req.token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    def _limpar():
+        api_url = req.base_url.rstrip("/") if req.base_url else BASE_URL
+        session = _make_session(api_url)
+        try:
+            r = session.post(f"{api_url}/api/auth/login",
+                json={"email": req.email, "password": req.password}, timeout=15)
+            if r.status_code not in (200, 201):
+                return {"status": "erro", "message": f"Falha no login (HTTP {r.status_code})"}
+        except Exception as e:
+            return {"status": "erro", "message": str(e)}
+        try:
+            r = session.delete(f"{api_url}/api/multi-bank/queue", timeout=10)
+            data = r.json()
+            return {"status": "ok", "removed": data.get("removed", 0), "message": data.get("message", "")}
+        except Exception as e:
+            return {"status": "erro", "message": str(e)}
+    return await asyncio.to_thread(_limpar)
+
+# ─────────────────────────── ADMIN: CREDENCIAIS ───────────────
+
+@app.get("/admin/credenciais")
+async def listar_credenciais(admin_token: str):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT id, email, ativo, total_consultas, falhas_consecutivas, ultimo_uso, criado_em
+            FROM credenciais ORDER BY id
+        """).fetchall()
+    return [{"id": r[0], "email": r[1], "ativo": bool(r[2]),
+             "total_consultas": r[3], "falhas_consecutivas": r[4],
+             "ultimo_uso": datetime.fromtimestamp(r[5]).strftime("%d/%m/%Y %H:%M") if r[5] else None,
+             "criado_em": r[6]} for r in rows]
+
+@app.post("/admin/credenciais")
+async def criar_credencial(req: CredencialCreate):
+    if req.admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    try:
+        with get_db() as db:
+            db.execute("INSERT INTO credenciais (email, password) VALUES (?, ?)", (req.email, req.password))
+            db.commit()
+        return {"status": "ok", "message": f"Credencial {req.email} criada"}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Email já cadastrado")
+
+@app.delete("/admin/credenciais/{cred_id}")
+async def deletar_credencial(cred_id: int, admin_token: str):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    with get_db() as db:
+        db.execute("DELETE FROM credenciais WHERE id=?", (cred_id,))
+        db.commit()
+    return {"status": "ok", "message": "Credencial removida"}
+
+@app.patch("/admin/credenciais/{cred_id}")
+async def atualizar_credencial(cred_id: int, req: CredencialUpdate):
+    if req.admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    with get_db() as db:
+        if req.ativo is not None:
+            db.execute("UPDATE credenciais SET ativo=?, falhas_consecutivas=0 WHERE id=?", (req.ativo, cred_id))
+        if req.password:
+            db.execute("UPDATE credenciais SET password=? WHERE id=?", (req.password, cred_id))
+        db.commit()
+    return {"status": "ok"}
+
+# ─────────────────────────── ADMIN: DASHBOARD ─────────────────
+
+@app.get("/admin/stats")
+async def stats(admin_token: str, dias: int = 7):
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    with get_db() as db:
+        total_hoje = db.execute(
+            "SELECT COUNT(*) FROM consultas WHERE date(criado_em)=date('now','localtime')"
+        ).fetchone()[0]
+        aprovados_hoje = db.execute(
+            "SELECT COUNT(*) FROM consultas WHERE date(criado_em)=date('now','localtime') AND resultado='pre_aprovado'"
+        ).fetchone()[0]
+        tempo_medio = db.execute(
+            "SELECT AVG(tempo_segundos) FROM consultas WHERE date(criado_em)=date('now','localtime')"
+        ).fetchone()[0]
+        por_empresa = db.execute("""
+            SELECT empresa, COUNT(*) as total,
+                   SUM(CASE WHEN resultado='pre_aprovado' THEN 1 ELSE 0 END) as aprovados
+            FROM consultas WHERE date(criado_em)=date('now','localtime')
+            GROUP BY empresa ORDER BY total DESC
+        """).fetchall()
+        por_dia = db.execute(f"""
+            SELECT date(criado_em) as dia, COUNT(*) as total,
+                   SUM(CASE WHEN resultado='pre_aprovado' THEN 1 ELSE 0 END) as aprovados
+            FROM consultas
+            WHERE criado_em >= date('now','localtime','-{dias} days')
+            GROUP BY dia ORDER BY dia DESC
+        """).fetchall()
+        credenciais = db.execute("""
+            SELECT email, ativo, total_consultas, falhas_consecutivas
+            FROM credenciais ORDER BY total_consultas DESC
+        """).fetchall()
+
+    return {
+        "hoje": {
+            "total": total_hoje,
+            "aprovados": aprovados_hoje,
+            "taxa": round(aprovados_hoje/total_hoje*100, 1) if total_hoje else 0,
+            "tempo_medio": round(tempo_medio or 0, 1)
+        },
+        "por_empresa": [{"empresa": r[0], "total": r[1], "aprovados": r[2],
+                         "taxa": round(r[2]/r[1]*100,1) if r[1] else 0} for r in por_empresa],
+        "por_dia": [{"dia": r[0], "total": r[1], "aprovados": r[2]} for r in por_dia],
+        "credenciais": [{"email": r[0], "ativo": bool(r[1]),
+                         "total": r[2], "falhas": r[3]} for r in credenciais]
+    }
+
+# ─────────────────────────── FRONTEND ─────────────────────────
+
+@app.get("/painel", response_class=HTMLResponse)
+async def painel():
+    html = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CorbanX Admin</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body { background: #0f172a; font-family: 'Inter', sans-serif; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+  .badge-on  { background: #064e3b; color: #34d399; border: 1px solid #065f46; }
+  .badge-off { background: #450a0a; color: #f87171; border: 1px solid #7f1d1d; }
+  .btn-primary { background: #6366f1; hover:background:#4f46e5; color:white; }
+  input, select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px 12px; width: 100%; }
+  input:focus, select:focus { outline: none; border-color: #6366f1; }
+</style>
+</head>
+<body class="text-slate-200 min-h-screen p-6">
+
+<!-- Header -->
+<div class="flex items-center justify-between mb-8">
+  <div class="flex items-center gap-3">
+    <div class="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-xl">🏦</div>
+    <div>
+      <h1 class="text-xl font-bold text-white">CorbanX Admin</h1>
+      <p class="text-xs text-slate-400">Dashboard de consultas</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-2">
+    <input id="adminToken" type="password" placeholder="Token admin" class="text-sm w-48" />
+    <button onclick="loadAll()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-lg transition">Entrar</button>
+  </div>
+</div>
+
+<!-- Stats Cards -->
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="statsCards">
+  <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Consultas Hoje</p><p class="text-3xl font-bold text-white" id="statTotal">—</p></div>
+  <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Pré-aprovados</p><p class="text-3xl font-bold text-emerald-400" id="statAprovados">—</p></div>
+  <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Taxa Aprovação</p><p class="text-3xl font-bold text-indigo-400" id="statTaxa">—</p></div>
+  <div class="card p-4 text-center"><p class="text-slate-400 text-xs mb-1">Tempo Médio</p><p class="text-3xl font-bold text-amber-400" id="statTempo">—</p></div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+  <!-- Gráfico por dia -->
+  <div class="card p-4 lg:col-span-2">
+    <h2 class="text-sm font-semibold text-slate-300 mb-4">📈 Consultas por dia</h2>
+    <canvas id="chartDia" height="120"></canvas>
+  </div>
+
+  <!-- Por empresa -->
+  <div class="card p-4">
+    <h2 class="text-sm font-semibold text-slate-300 mb-4">🏢 Por empresa (hoje)</h2>
+    <div id="empresaList" class="space-y-2 text-sm"></div>
+  </div>
+
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+  <!-- Credenciais -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-sm font-semibold text-slate-300">🔑 Credenciais</h2>
+      <button onclick="document.getElementById('modalAdd').classList.remove('hidden')"
+        class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-lg transition">+ Adicionar</button>
+    </div>
+    <div id="credList" class="space-y-2"></div>
+  </div>
+
+  <!-- Log recente -->
+  <div class="card p-4">
+    <h2 class="text-sm font-semibold text-slate-300 mb-4">📋 Últimas consultas</h2>
+    <div id="logList" class="space-y-1 text-xs"></div>
+  </div>
+
+</div>
+
+<!-- Modal Add Credencial -->
+<div id="modalAdd" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+  <div class="card p-6 w-full max-w-md">
+    <h3 class="font-semibold text-white mb-4">Nova Credencial CorbanX</h3>
+    <div class="space-y-3">
+      <input id="newEmail" type="email" placeholder="Email" />
+      <input id="newPassword" type="password" placeholder="Senha" />
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button onclick="addCredencial()" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg text-sm transition">Salvar</button>
+      <button onclick="document.getElementById('modalAdd').classList.add('hidden')"
+        class="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-2 rounded-lg text-sm transition">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let chartInstance = null;
+
+function token() { return document.getElementById('adminToken').value; }
+
+async function loadAll() {
+  await Promise.all([loadStats(), loadCredenciais()]);
+}
+
+async function loadStats() {
+  const r = await fetch(`/admin/stats?admin_token=${token()}&dias=7`);
+  if (!r.ok) { alert('Token inválido'); return; }
+  const d = await r.json();
+
+  document.getElementById('statTotal').textContent = d.hoje.total;
+  document.getElementById('statAprovados').textContent = d.hoje.aprovados;
+  document.getElementById('statTaxa').textContent = d.hoje.taxa + '%';
+  document.getElementById('statTempo').textContent = d.hoje.tempo_medio + 's';
+
+  // Gráfico
+  const dias   = d.por_dia.map(x => x.dia).reverse();
+  const totais = d.por_dia.map(x => x.total).reverse();
+  const aprov  = d.por_dia.map(x => x.aprovados).reverse();
+  if (chartInstance) chartInstance.destroy();
+  chartInstance = new Chart(document.getElementById('chartDia'), {
+    type: 'bar',
+    data: {
+      labels: dias,
+      datasets: [
+        { label: 'Total', data: totais, backgroundColor: '#6366f1aa', borderRadius: 4 },
+        { label: 'Aprovados', data: aprov, backgroundColor: '#34d399aa', borderRadius: 4 }
+      ]
+    },
+    options: { responsive: true, plugins: { legend: { labels: { color: '#94a3b8', font: {size:11} } } },
+      scales: { x: { ticks: {color:'#94a3b8'}, grid:{color:'#1e293b'} }, y: { ticks:{color:'#94a3b8'}, grid:{color:'#334155'} } } }
+  });
+
+  // Empresas
+  const el = document.getElementById('empresaList');
+  el.innerHTML = d.por_empresa.length ? d.por_empresa.map(e => `
+    <div class="flex items-center justify-between py-1.5 border-b border-slate-700">
+      <span class="text-slate-300 truncate max-w-[120px]">${e.empresa}</span>
+      <div class="flex gap-2 text-right">
+        <span class="text-white font-medium">${e.total}</span>
+        <span class="text-emerald-400">${e.taxa}%</span>
+      </div>
+    </div>`).join('') : '<p class="text-slate-500 text-xs">Sem consultas hoje</p>';
+}
+
+async function loadCredenciais() {
+  const r = await fetch(`/admin/credenciais?admin_token=${token()}`);
+  if (!r.ok) return;
+  const creds = await r.json();
+  const el = document.getElementById('credList');
+  el.innerHTML = creds.map(c => `
+    <div class="flex items-center justify-between py-2 border-b border-slate-700 text-sm">
+      <div class="flex-1 min-w-0">
+        <p class="text-white truncate text-xs">${c.email}</p>
+        <p class="text-slate-500 text-xs">${c.total_consultas} consultas · ${c.falhas_consecutivas} falhas</p>
+      </div>
+      <div class="flex items-center gap-2 ml-2">
+        <span class="text-xs px-2 py-0.5 rounded-full ${c.ativo ? 'badge-on' : 'badge-off'}">${c.ativo ? 'ON' : 'OFF'}</span>
+        <button onclick="toggleCredencial(${c.id}, ${c.ativo})"
+          class="text-xs px-2 py-1 rounded ${c.ativo ? 'bg-slate-700 hover:bg-red-900' : 'bg-slate-700 hover:bg-emerald-900'} transition">
+          ${c.ativo ? 'Pausar' : 'Ativar'}
+        </button>
+        <button onclick="deleteCredencial(${c.id})"
+          class="text-xs px-2 py-1 rounded bg-slate-700 hover:bg-red-900 transition">🗑</button>
+      </div>
+    </div>`).join('') || '<p class="text-slate-500 text-xs">Nenhuma credencial cadastrada</p>';
+}
+
+async function addCredencial() {
+  const email = document.getElementById('newEmail').value;
+  const password = document.getElementById('newPassword').value;
+  if (!email || !password) { alert('Preencha email e senha'); return; }
+  const r = await fetch('/admin/credenciais', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({email, password, admin_token: token()})
+  });
+  const d = await r.json();
+  if (r.ok) {
+    document.getElementById('modalAdd').classList.add('hidden');
+    document.getElementById('newEmail').value = '';
+    document.getElementById('newPassword').value = '';
+    loadCredenciais();
+  } else { alert(d.detail || 'Erro ao adicionar'); }
+}
+
+async function toggleCredencial(id, ativo) {
+  await fetch(`/admin/credenciais/${id}`, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({admin_token: token(), ativo: ativo ? 0 : 1})
+  });
+  loadCredenciais();
+}
+
+async function deleteCredencial(id) {
+  if (!confirm('Remover credencial?')) return;
+  await fetch(`/admin/credenciais/${id}?admin_token=${token()}`, {method:'DELETE'});
+  loadCredenciais();
+}
+
+// Auto-refresh a cada 30s
+setInterval(() => { if (token()) loadAll(); }, 30000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(html)
