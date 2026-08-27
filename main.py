@@ -15,7 +15,7 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="5.0.0")
+app = FastAPI(title="CorbanX API", version="5.0.1")
 
 BASE_URL = "https://neocashpromotora.log.br"
 
@@ -58,6 +58,8 @@ class ConsultaRequest(BaseModel):
     password: str
     banks: Optional[List[str]] = None
     base_url: Optional[str] = None
+    name: Optional[str] = "Cliente"
+    phone: Optional[str] = "(11) 99999-9999"
 
 
 class ConsultaEnergiaRequest(BaseModel):
@@ -362,11 +364,13 @@ def _executar_sync(cpf: str, email: str, password: str, tipo: str, banks: list, 
 
     payload = {
         "cpf": cpf_fmt,
-        "name": "", "birthDate": "", "motherName": "",
+        "name": extra_payload.get("name", "Cliente") if extra_payload else "Cliente",
+        "birthDate": "", "motherName": "",
         "productType": tipo,
         "selectedBanks": banks,
         "userIP": "189.126.131.81",
-        "phone": "", "cep": "", "clearCache": False,
+        "phone": extra_payload.get("phone", "(11) 99999-9999") if extra_payload else "(11) 99999-9999",
+        "cep": "", "clearCache": False,
         "maxWaitMs": 180000,
         "titanOperationalSystem": "Windows",
         "titanDeviceModel": "Desktop Windows"
@@ -448,19 +452,21 @@ async def endpoint_limpar_fila(req: LimparFilaRequest):
 
 @app.get("/")
 async def health():
-    return {"status": "online", "service": "corbanx-api", "version": "5.0.0"}
+    return {"status": "online", "service": "corbanx-api", "version": "5.0.1"}
 
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
     banks = req.banks or BANKS_CLT
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, None, req.base_url)
+    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone or "(11) 99999-9999")}
+    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "CLT", banks, extra, req.base_url)
 
 
 @app.post("/simular_corbanx_fgts")
 async def simular_fgts(req: ConsultaRequest):
     banks = req.banks or BANKS_FGTS
-    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, None, req.base_url)
+    extra = {"name": req.name or "Cliente", "phone": formatar_phone(req.phone or "(11) 99999-9999")}
+    return await asyncio.to_thread(_executar_sync, req.cpf, req.email, req.password, "FGTS", banks, extra, req.base_url)
 
 
 @app.post("/simular_corbanx_energia")
