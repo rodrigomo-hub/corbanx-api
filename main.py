@@ -24,7 +24,7 @@ from typing import Optional, List
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorbanX API", version="6.0.0")
+app = FastAPI(title="CorbanX API", version="6.1.0")
 
 # ─────────────────────────── CONFIG ───────────────────────────
 
@@ -473,7 +473,7 @@ async def health():
     with get_db() as db:
         total_creds = db.execute("SELECT COUNT(*) FROM credenciais WHERE ativo=1").fetchone()[0]
         total_hoje  = db.execute("SELECT COUNT(*) FROM consultas WHERE date(criado_em)=date('now','localtime')").fetchone()[0]
-    return {"status": "online", "service": "corbanx-api", "version": "6.0.0",
+    return {"status": "online", "service": "corbanx-api", "version": "6.1.0",
             "credenciais_ativas": total_creds, "consultas_hoje": total_hoje}
 
 @app.post("/simular_corbanx_clt")
