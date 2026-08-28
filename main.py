@@ -92,13 +92,18 @@ _rr_lock = threading.Lock()
 _rr_index = 0
 
 def get_next_credencial():
-    """Sempre pega a credencial com menor ultimo_uso (menos usada recentemente)"""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT id, email, password FROM credenciais WHERE ativo=1 ORDER BY ultimo_uso ASC LIMIT 1"
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=503, detail="Nenhuma credencial ativa disponível")
+    """Pega credencial com menor ultimo_uso e já atualiza o timestamp (evita concorrência)"""
+    with _rr_lock:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT id, email, password FROM credenciais WHERE ativo=1 ORDER BY ultimo_uso ASC LIMIT 1"
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=503, detail="Nenhuma credencial ativa disponível")
+            # Atualiza ultimo_uso imediatamente pra próxima consulta pegar a outra credencial
+            import time as _time
+            db.execute("UPDATE credenciais SET ultimo_uso=? WHERE id=?", (_time.time(), row[0]))
+            db.commit()
     return row  # (id, email, password)
 
 def registrar_uso(cred_id: int, sucesso: bool):
