@@ -353,12 +353,37 @@ def _limpar_fila(session, api_url, cpf_clean):
     except Exception as e:
         logger.warning(f"[{cpf_clean}] Erro ao limpar fila: {e}")
 
+# Mapeia mensagens de erro para nomes de bancos
+GRUPO_BANCO = {
+    "Grupo H": "TITAN",
+    "VCTeX": "VCTEX",
+    "Crefaz": "CREFAZ",
+    "V8": "V8_DIGITAL",
+    "Mercantil": "MERCANTIL",
+    "Presença": "PRESENCA",
+    "Presenca": "PRESENCA",
+    "Novo Saque": "NOVO_SAQUE_CLT",
+    "Banco Prata": "BANCO_PRATA_CELCOIN",
+}
+
+def detectar_banco_sem_credencial(msg: str):
+    """Detecta qual banco não tem credencial configurada pela mensagem de erro"""
+    if not msg:
+        return None
+    msg_lower = msg.lower()
+    if "credencial" not in msg_lower and "configurada" not in msg_lower:
+        return None
+    for chave, banco in GRUPO_BANCO.items():
+        if chave.lower() in msg_lower:
+            return banco
+    return None
+
 def _consultar(session, payload, api_url):
     payload = {k: v for k, v in payload.items() if k != "maxWaitMs"}
     try:
         r = session.post(f"{api_url}/api/multi-bank/consult", json=payload, timeout=30)
         if r.status_code not in (200, 202):
-            return None, f"HTTP {r.status_code}"
+            return None, r.text[:300]
         return r.json().get("jobId"), None
     except Exception as e:
         return None, str(e)
