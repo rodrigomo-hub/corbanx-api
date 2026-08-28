@@ -49,6 +49,24 @@ POLLING_INTERVAL  = 5
 POLLING_MAX       = 36   # 3 minutos
 FILA_CHEIA_CHECKS = 24   # 2 minutos
 
+# ─────────────────────────── CONTADOR ATIVAS ─────────────────
+import threading as _threading
+_consultas_ativas = 0
+_ativas_lock = _threading.Lock()
+
+def incrementar_ativas():
+    global _consultas_ativas
+    with _ativas_lock:
+        _consultas_ativas += 1
+
+def decrementar_ativas():
+    global _consultas_ativas
+    with _ativas_lock:
+        _consultas_ativas = max(0, _consultas_ativas - 1)
+
+def get_ativas():
+    return _consultas_ativas
+
 # ─────────────────────────── DATABASE ─────────────────────────
 
 def get_db():
@@ -414,6 +432,7 @@ def _executar_sync(cpf: str, tipo: str, banks: list, extra_payload: dict, empres
     cpf_fmt    = formatar_cpf(cpf)
     api_url    = base_url.rstrip("/") if base_url else BASE_URL
     inicio     = time.time()
+    incrementar_ativas()
 
     # Pega próxima credencial (round-robin)
     max_tentativas = 3
@@ -486,6 +505,7 @@ def _executar_sync(cpf: str, tipo: str, banks: list, extra_payload: dict, empres
         }
 
     tempo = time.time() - inicio
+    decrementar_ativas()
     log_consulta(empresa, cpf_clean, tipo, "fila_cheia", None, round(tempo, 1), 0)
     return {
         "resultado": "fila_cheia",
@@ -500,8 +520,8 @@ async def health():
     with get_db() as db:
         total_creds = db.execute("SELECT COUNT(*) FROM credenciais WHERE ativo=1").fetchone()[0]
         total_hoje  = db.execute("SELECT COUNT(*) FROM consultas WHERE date(criado_em)=date('now','localtime')").fetchone()[0]
-    return {"status": "online", "service": "corbanx-api", "version": "6.1.0",
-            "credenciais_ativas": total_creds, "consultas_hoje": total_hoje}
+    return {"status": "online", "service": "corbanx-api", "version": "6.2.1",
+            "credenciais_ativas": total_creds, "consultas_hoje": total_hoje, "processando_agora": get_ativas()}
 
 @app.post("/simular_corbanx_clt")
 async def simular_clt(req: ConsultaRequest):
@@ -647,6 +667,7 @@ async def stats(admin_token: str, dias: int = 7):
         """).fetchall()
 
     return {
+        "processando_agora": get_ativas(),
         "hoje": {
             "total": total_hoje,
             "aprovados": aprovados_hoje,
