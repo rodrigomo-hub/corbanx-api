@@ -540,11 +540,26 @@ async def listar_credenciais(admin_token: str):
 async def criar_credencial(req: CredencialCreate):
     if req.admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Token admin inválido")
+
+    # Testa login antes de salvar
+    def _testar_login():
+        session = _make_session(BASE_URL)
+        try:
+            r = session.post(f"{BASE_URL}/api/auth/login",
+                json={"email": req.email, "password": req.password}, timeout=15)
+            return r.status_code in (200, 201)
+        except Exception:
+            return False
+
+    login_ok = await asyncio.to_thread(_testar_login)
+    if not login_ok:
+        raise HTTPException(status_code=400, detail="Credencial inválida — login na CorbanX falhou")
+
     try:
         with get_db() as db:
             db.execute("INSERT INTO credenciais (email, password) VALUES (?, ?)", (req.email, req.password))
             db.commit()
-        return {"status": "ok", "message": f"Credencial {req.email} criada"}
+        return {"status": "ok", "message": f"Credencial {req.email} criada e validada"}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Email já cadastrado")
 
