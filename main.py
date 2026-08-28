@@ -118,7 +118,7 @@ def registrar_uso(cred_id: int, sucesso: bool):
             # Desativa se falhou 3x seguidas
             db.execute("""
                 UPDATE credenciais SET ativo=0
-                WHERE id=? AND falhas_consecutivas >= 3
+                WHERE id=? AND falhas_consecutivas >= 10
             """, (cred_id,))
         db.commit()
 
@@ -332,11 +332,12 @@ def _login(session, email, password, api_url, cpf_clean):
         r = session.post(f"{api_url}/api/auth/login",
             json={"email": email, "password": password}, timeout=15)
         if r.status_code not in (200, 201):
-            logger.warning(f"[{cpf_clean}] Login falhou ({email}): HTTP {r.status_code}")
+            logger.warning(f"[{cpf_clean}] Login FALHOU ({email}): HTTP {r.status_code} | {r.text[:100]}")
             return False
+        logger.info(f"[{cpf_clean}] Login OK ({email})")
         return True
     except Exception as e:
-        logger.error(f"[{cpf_clean}] Erro login: {e}")
+        logger.error(f"[{cpf_clean}] Erro login ({email}): {e}")
         return False
 
 def _limpar_fila(session, api_url, cpf_clean):
