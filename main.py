@@ -323,9 +323,28 @@ def montar_anotacao(results: list, tipo: str, parcial: bool = False, total_banks
             parcela = r.get("valor_parcela") or r.get("saldo_24m")
             prazo   = r.get("prazo")
             vl      = r.get("valor_liberado")
+
+            # Tenta extrair dados da simulação do Mercantil
+            merc_sim = r.get("mercantil_simulacao") or {}
+            tabelas = merc_sim.get("tabelaFlexivel") or []
+            if tabelas and not parcela:
+                try:
+                    prestacao = tabelas[0]["prestacao"][0]
+                    val_parcela = prestacao.get("valorParcela", 0)
+                    val_liberado = prestacao.get("valorLiberado", 0)
+                    qtd_parcelas = prestacao.get("quantidadeParcelas", 0)
+                    if val_parcela:
+                        parcela = f"R$ {val_parcela:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                    if val_liberado:
+                        vl = f"R$ {val_liberado:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                    if qtd_parcelas:
+                        prazo = str(qtd_parcelas)
+                except Exception:
+                    pass
+
             linhas.append(f"Margem: {margem}")
             if parcela:
-                label = "Saldo 24m" if not r.get("valor_parcela") else "Parcela"
+                label = "Saldo 24m" if not r.get("valor_parcela") and not tabelas else "Parcela"
                 linhas.append(f"{label}: {parcela}" + (f" | Prazo: {prazo}x" if prazo else ""))
             if vl:
                 linhas.append(f"Valor Liberado: {vl}")
