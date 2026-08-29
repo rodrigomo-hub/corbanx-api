@@ -145,17 +145,16 @@ def registrar_uso(cred_id: int, sucesso: bool):
             """, (cred_id,))
         db.commit()
 
-def log_consulta(empresa, cpf, tipo, resultado, credencial_email, tempo, bancos, facta_resultado=None):
-    # Se CorbanX sem_margem mas Facta pré-aprovou, considera aprovado na taxa
+def log_consulta(empresa, cpf, tipo, resultado, credencial_email, tempo, bancos, facta_resultado=None, anotacao=None):
     resultado_efetivo = resultado
     if resultado == "sem_margem" and facta_resultado == "pre_aprovado":
         resultado_efetivo = "pre_aprovado"
     with get_db() as db:
         try:
             db.execute("""
-                INSERT INTO consultas (empresa, cpf, tipo, resultado, facta_resultado, credencial_email, tempo_segundos, bancos_consultados)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (empresa, cpf, tipo, resultado_efetivo, facta_resultado, credencial_email, tempo, bancos))
+                INSERT INTO consultas (empresa, cpf, tipo, resultado, facta_resultado, anotacao, credencial_email, tempo_segundos, bancos_consultados)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (empresa, cpf, tipo, resultado_efetivo, facta_resultado, anotacao, credencial_email, tempo, bancos))
         except Exception:
             db.execute("""
                 INSERT INTO consultas (empresa, cpf, tipo, resultado, credencial_email, tempo_segundos, bancos_consultados)
@@ -523,7 +522,7 @@ def _executar_sync(cpf: str, tipo: str, banks: list, extra_payload: dict, empres
         if tipo == "FGTS" and last_results:
             resultado = definir_resultado_fgts(last_results)
 
-        log_consulta(empresa, cpf_clean, tipo, resultado, email, round(tempo, 1), len(last_results), extra_payload.get("facta_resultado") if extra_payload else None)
+        log_consulta(empresa, cpf_clean, tipo, resultado, email, round(tempo, 1), len(last_results), extra_payload.get("facta_resultado") if extra_payload else None, anotacao)
 
         return {
             "resultado": resultado,
@@ -732,7 +731,7 @@ async def listar_consultas(admin_token: str, empresa: str = None, resultado: str
     if resultado:
         where.append("resultado=?")
         params.append(resultado)
-    sql = "SELECT id, empresa, cpf, tipo, resultado, COALESCE(facta_resultado,'') as facta_resultado, credencial_email, tempo_segundos, bancos_consultados, criado_em FROM consultas"
+    sql = "SELECT id, empresa, cpf, tipo, resultado, COALESCE(facta_resultado,'') as facta_resultado, COALESCE(anotacao,'') as anotacao, credencial_email, tempo_segundos, bancos_consultados, criado_em FROM consultas"
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC LIMIT ?"
@@ -740,7 +739,7 @@ async def listar_consultas(admin_token: str, empresa: str = None, resultado: str
     with get_db() as db:
         rows = db.execute(sql, params).fetchall()
     return [{"id": r[0], "empresa": r[1], "cpf": r[2], "tipo": r[3], "resultado": r[4],
-             "facta": r[5], "credencial": r[6], "tempo": r[7], "bancos": r[8], "criado_em": r[9]} for r in rows]
+             "facta": r[5], "anotacao": r[6], "credencial": r[7], "tempo": r[8], "bancos": r[9], "criado_em": r[10]} for r in rows]
 
 @app.get("/admin/empresas")
 async def listar_empresas(admin_token: str):

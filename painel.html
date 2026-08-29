@@ -415,6 +415,35 @@ async function deleteCredencial(id){
   loadCredenciais();
 }
 
+// Modal detalhes
+document.getElementById('btnFecharDetalhes').addEventListener('click', function() {
+  document.getElementById('modalDetalhes').style.display = 'none';
+});
+
+function abrirDetalhes(anotacao, cpf, empresa, resultado, tempo) {
+  var info = 'CPF: ' + cpf + '\nEmpresa: ' + empresa + '\nResultado: ' + resultado + '\nTempo: ' + tempo + 's\n\n' + (anotacao || 'Sem detalhes');
+  document.getElementById('modalDetalhesConteudo').textContent = info;
+  document.getElementById('modalDetalhes').style.display = 'flex';
+}
+
+// Exportar CSV
+var ultimasConsultas = [];
+
+document.getElementById('btnExportar').addEventListener('click', function() {
+  if (!ultimasConsultas.length) { alert('Nenhum dado para exportar'); return; }
+  var cols = ['id','criado_em','empresa','cpf','tipo','facta','resultado','bancos','tempo','credencial'];
+  var header = cols.join(';');
+  var rows = ultimasConsultas.map(function(r) {
+    return cols.map(function(c) { return (r[c] || '').toString().replace(/;/g, ','); }).join(';');
+  });
+  var csv = header + '\n' + rows.join('\n');
+  var blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'consultas_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+});
+
 // Auto-refresh dashboard a cada 30s
 setInterval(()=>{
   if(savedToken()&&currentTab==='dashboard') loadStats();
